@@ -130,11 +130,14 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 	}
 
 	var files []FileInfo
+	// Normalize the base path for comparison (handle both with and without trailing slash)
 	basePath := "/remote.php/dav/files/" + c.Username + path
+	basePathNormalized := strings.TrimSuffix(basePath, "/")
 	for _, r := range ms.Responses {
 		// Skip the directory itself (first response is the requested directory)
 		decodedHref, _ := url.PathUnescape(r.Href)
-		if decodedHref == basePath || decodedHref == basePath+"/" {
+		decodedHrefNormalized := strings.TrimSuffix(decodedHref, "/")
+		if decodedHrefNormalized == basePathNormalized {
 			continue
 		}
 

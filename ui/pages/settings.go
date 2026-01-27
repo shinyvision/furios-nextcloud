@@ -7,9 +7,16 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-func NewSettingsPage(showPage func(string)) *gtk.Box {
+func NewSettingsPage(showPage func(string), setBackHandler func(func(), bool)) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.AddCSSClass("files-container") // Re-use light background class
+
+	// Show back button when settings page is mapped (becomes visible)
+	box.ConnectMap(func() {
+		setBackHandler(func() {
+			showPage("files")
+		}, true)
+	})
 
 	content := gtk.NewBox(gtk.OrientationVertical, 20)
 	content.SetMarginTop(20)
