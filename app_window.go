@@ -105,7 +105,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	titleBox.SetMarginStart(20)
 	titleBox.SetMarginTop(20)
 	titleBox.SetMarginBottom(10)
-	
+
 	menuLabel := gtk.NewLabel("Menu")
 	menuLabel.AddCSSClass("welcome-label")
 	titleBox.Append(menuLabel)
@@ -114,14 +114,14 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	addMenuBtn := func(label string, icon string, action func()) {
 		btn := gtk.NewButton()
 		btnBox := gtk.NewBox(gtk.OrientationHorizontal, 15)
-		
+
 		img := gtk.NewImageFromIconName(icon)
 		btnBox.Append(img)
-		
+
 		lbl := gtk.NewLabel(label)
 		lbl.SetHAlign(gtk.AlignStart)
 		btnBox.Append(lbl)
-		
+
 		btn.SetChild(btnBox)
 		btn.ConnectClicked(action)
 		menuBox.Append(btn)
@@ -150,7 +150,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	loginPage := pages.NewLoginPage(showPage)
 	stack.AddNamed(loginPage.Box, "login")
 
-	filesPage := pages.NewFilesPage(showPage, func() { toggleMenu(true) }, setBackHandler)
+	filesPage := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler)
 	stack.AddNamed(filesPage, "files")
 
 	settingsPage := pages.NewSettingsPage(showPage, setBackHandler)

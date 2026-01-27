@@ -2,6 +2,7 @@ package pages
 
 import (
 	"log"
+	"math"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
 	"nextcloud-gtk/ui/components"
@@ -13,7 +14,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(func(), bool)) *gtk.Box {
+func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), setBackHandler func(func(), bool)) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.AddCSSClass("files-container")
 
@@ -148,31 +149,38 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 						folderName := f.Name
 						pressed := false
 
-						// Track when pointer leaves widget while pressed
-						motion := gtk.NewEventControllerMotion()
-						motion.Connect("leave", func() {
-							if pressed {
-								pressed = false
-								fileItem.RemoveCSSClass("folder-pressed")
-							}
-						})
-						fileItem.AddController(motion)
-
-						// Click gesture
-						gesture := gtk.NewGestureClick()
-						gesture.SetButton(uint(gdk.BUTTON_PRIMARY))
-
-						gesture.Connect("pressed", func(nPress int, x, y float64) {
+						// Drag gesture for press/release navigation with threshold
+						dragGesture := gtk.NewGestureDrag()
+						dragGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
+						dragGesture.Connect("drag-begin", func(startX, startY float64) {
 							pressed = true
 							fileItem.AddCSSClass("folder-pressed")
 						})
 
-						gesture.Connect("released", func(nPress int, x, y float64) {
+						dragGesture.Connect("drag-update", func(offsetX, offsetY float64) {
+							if !pressed {
+								return
+							}
+							dist := math.Hypot(offsetX, offsetY)
+							if dist > 45 {
+								pressed = false
+								fileItem.RemoveCSSClass("folder-pressed")
+							}
+						})
+
+						dragGesture.Connect("drag-end", func(offsetX, offsetY float64) {
 							fileItem.RemoveCSSClass("folder-pressed")
 							if !pressed {
 								return
 							}
-							pressed = false
+							pressed = false // Reset logic
+
+							// Double check distance logic just in case
+							dist := math.Hypot(offsetX, offsetY)
+							if dist > 45 {
+								return
+							}
+
 							var newPath string
 							if path == "/" {
 								newPath = "/" + folderName
@@ -182,7 +190,64 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 							refreshFiles(newPath)
 						})
 
-						fileItem.AddController(gesture)
+						fileItem.AddController(dragGesture)
+
+						// Long press for context menu
+						longPress := gtk.NewGestureLongPress()
+						longPress.SetTouchOnly(false)
+						longPress.Connect("pressed", func(x, y float64) {
+							// Reset pressed state so we don't also navigate
+							pressed = false
+							fileItem.RemoveCSSClass("folder-pressed")
+
+							// Open Modal
+							modal := components.NewModal(parentOverlay)
+
+							// Content
+							content := gtk.NewBox(gtk.OrientationVertical, 5)
+
+							// Title
+							title := gtk.NewLabel(folderName)
+							title.AddCSSClass("modal-title")
+							title.SetMarginBottom(10)
+							content.Append(title)
+
+							createBtn := func(label string, cssClass string, closeOnAction bool, action func()) {
+								btn := gtk.NewButton()
+
+								// Label
+								lbl := gtk.NewLabel(label)
+								btn.SetChild(lbl)
+
+								btn.AddCSSClass("modal-button") // Base style
+								btn.AddCSSClass(cssClass)       // Color variant
+
+								btn.SetHAlign(gtk.AlignFill)
+								btn.ConnectClicked(func() {
+									if closeOnAction {
+										modal.Hide()
+									}
+									if action != nil {
+										action()
+									}
+								})
+								content.Append(btn)
+							}
+
+							createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
+								log.Println("Sync requested for:", folderName)
+							})
+
+							createBtn("Delete folder", "modal-btn-secondary", false, func() {
+								log.Println("Delete requested for:", folderName)
+							})
+
+							createBtn("Cancel", "modal-btn-secondary", true, nil)
+
+							modal.SetContent(content)
+							modal.Show()
+						})
+						fileItem.AddController(longPress)
 					}
 
 					grid.Append(fileItem)
