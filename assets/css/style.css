@@ -14,7 +14,7 @@
 }
 
 .header-back-btn:hover {
-    background-color: rgba(255,255,255,0.2);
+    background-color: rgba(255, 255, 255, 0.2);
 }
 
 .header-logo {
@@ -38,15 +38,21 @@
     fill: #0091f2;
 }
 
-.footer-bar {
-    display: none;
+.clickable-folder {
+    border-radius: 8px;
+    padding: 8px;
+    margin: -8px;
+}
+
+.folder-pressed {
+    background-color: rgba(0, 130, 201, 0.15);
 }
 
 /* Sidebar Menu */
 .sidebar-menu {
     background-color: #ffffff;
     border-left: 1px solid #e0e0e0;
-    box-shadow: -5px 0 15px rgba(0,0,0,0.1);
+    box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
 }
 
 .sidebar-menu button {
@@ -70,7 +76,7 @@
 }
 
 .menu-overlay {
-    background-color: rgba(0,0,0,0.3);
+    background-color: rgba(0, 0, 0, 0.3);
 }
 
 .welcome-label {
@@ -133,4 +139,34 @@ button.secondary-action {
 
 button.secondary-action:active {
     background-color: #e0e0e0;
+}
+
+/* Material Design Spinner */
+.spinner-container {
+    padding: 20px;
+}
+
+.material-spinner {
+    color: #9e9e9e;
+    opacity: 1;
+    animation: spinner-rotate 1.4s linear infinite;
+}
+
+@keyframes spinner-rotate {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+/* GTK Spinner color override - light gray */
+spinner.material-spinner {
+    color: #9e9e9e;
+}
+
+spinner.material-spinner:checked {
+    color: #9e9e9e;
 }

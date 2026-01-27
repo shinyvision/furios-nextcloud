@@ -4,12 +4,13 @@ import (
 	"log"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
+	"nextcloud-gtk/ui/components"
 	"os"
 	"strings"
 
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 )
 
 func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(func(), bool)) *gtk.Box {
@@ -20,6 +21,7 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 	var currentPath = "/"
 	var grid *gtk.FlowBox
 	var refreshFiles func(string)
+	var spinner *gtk.Box
 
 	// Search bar
 	searchBox := gtk.NewBox(gtk.OrientationVertical, 10)
@@ -49,14 +51,23 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 	scrolled.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
 	scrolled.SetVExpand(true)
 	scrolled.SetChild(grid)
-	box.Append(scrolled)
+
+	// Spinner overlay
+	overlay := gtk.NewOverlay()
+	overlay.SetChild(scrolled)
+	overlay.SetVExpand(true)
+
+	spinner = components.NewSpinner()
+	spinner.SetVisible(false)
+	overlay.AddOverlay(spinner)
+
+	box.Append(overlay)
 
 	folderPath := "assets/icons/ui/folder.svg"
 	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
 		folderPath = "/app/share/nextcloud-gtk/assets/icons/ui/folder.svg"
 	}
 
-	// Navigate up one directory
 	navigateUp := func() {
 		if currentPath == "/" {
 			return
@@ -70,10 +81,8 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 		}
 	}
 
-	// Load real data
 	refreshFiles = func(path string) {
 		currentPath = path
-		// Clear grid
 		for {
 			child := grid.FirstChild()
 			if child == nil {
@@ -97,15 +106,22 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 			return
 		}
 
+		spinner.SetVisible(true)
+
 		go func() {
 			client := nextcloud.NewClient(url, user, pass)
 			files, err := client.ListFiles(path)
 			if err != nil {
 				log.Printf("Failed to list files: %v", err)
+				glib.IdleAdd(func() {
+					spinner.SetVisible(false)
+				})
 				return
 			}
 
 			glib.IdleAdd(func() {
+				spinner.SetVisible(false)
+
 				for _, f := range files {
 					fileItem := gtk.NewBox(gtk.OrientationVertical, 5)
 					fileItem.SetSizeRequest(80, 100)
@@ -126,13 +142,37 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 					nameLabel.SetSizeRequest(80, -1)
 					fileItem.Append(nameLabel)
 
-					// Make folders clickable
+					// Make folders clickable with touch-friendly interaction
 					if f.Type == "dir" {
 						fileItem.AddCSSClass("clickable-folder")
+						folderName := f.Name
+						pressed := false
+
+						// Track when pointer leaves widget while pressed
+						motion := gtk.NewEventControllerMotion()
+						motion.Connect("leave", func() {
+							if pressed {
+								pressed = false
+								fileItem.RemoveCSSClass("folder-pressed")
+							}
+						})
+						fileItem.AddController(motion)
+
+						// Click gesture
 						gesture := gtk.NewGestureClick()
 						gesture.SetButton(uint(gdk.BUTTON_PRIMARY))
-						folderName := f.Name
+
 						gesture.Connect("pressed", func(nPress int, x, y float64) {
+							pressed = true
+							fileItem.AddCSSClass("folder-pressed")
+						})
+
+						gesture.Connect("released", func(nPress int, x, y float64) {
+							fileItem.RemoveCSSClass("folder-pressed")
+							if !pressed {
+								return
+							}
+							pressed = false
 							var newPath string
 							if path == "/" {
 								newPath = "/" + folderName
@@ -141,6 +181,7 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 							}
 							refreshFiles(newPath)
 						})
+
 						fileItem.AddController(gesture)
 					}
 
@@ -150,8 +191,6 @@ func NewFilesPage(showPage func(string), openMenu func(), setBackHandler func(fu
 		}()
 	}
 
-	// Refresh when page becomes visible? 
-	// For now just once
 	refreshFiles("/")
 
 	return box
