@@ -1,231 +1,239 @@
 .main-window {
-    background-color: #f7f7f7;
+  background-color: #f7f7f7;
 }
 
 .header-bar {
-    background-color: #0082c9;
-    padding: 12px;
+  background-color: #0082c9;
+  padding: 12px;
 }
 
 .header-back-btn {
-    color: #ffffff;
-    padding: 4px 8px;
-    margin-right: 8px;
+  color: #ffffff;
+  padding: 4px 8px;
+  margin-right: 8px;
 }
 
 .header-back-btn:hover {
-    background-color: rgba(255, 255, 255, 0.2);
+  background-color: rgba(255, 255, 255, 0.2);
 }
 
 .header-logo {
-    color: #ffffff;
-    font-size: 22px;
-    font-weight: 800;
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 800;
 }
 
 .files-container {
-    background-color: #ffffff;
+  background-color: #ffffff;
 }
 
 .file-label {
-    color: #333333;
-    font-size: 13px;
-    font-weight: 500;
+  color: #333333;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .folder-icon {
-    color: #0091f2;
-    fill: #0091f2;
+  color: #0091f2;
+  fill: #0091f2;
 }
 
 .clickable-folder {
-    border-radius: 8px;
-    padding: 8px;
-    margin: -8px;
+  border-radius: 8px;
 }
 
 .folder-pressed {
-    background-color: rgba(0, 130, 201, 0.15);
+  background-color: rgba(0, 130, 201, 0.15);
 }
 
 /* Sidebar Menu */
 .sidebar-menu {
-    background-color: #ffffff;
-    border-left: 1px solid #e0e0e0;
-    box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
+  background-color: #ffffff;
+  border-left: 1px solid #e0e0e0;
+  box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
 }
 
 .sidebar-menu button {
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 15px 20px;
-    margin: 0;
-    box-shadow: none;
-    background-image: none;
-    color: #333333;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 15px 20px;
+  margin: 0;
+  box-shadow: none;
+  background-image: none;
+  color: #333333;
 }
 
 .sidebar-menu button:hover {
-    background-color: #f0f0f0;
+  background-color: #f0f0f0;
 }
 
 .sidebar-menu label {
-    font-weight: 500;
-    font-size: 16px;
+  font-weight: 500;
+  font-size: 16px;
 }
 
 .menu-overlay {
-    background-color: rgba(0, 0, 0, 0.3);
+  background-color: rgba(0, 0, 0, 0.3);
 }
 
 .welcome-label {
-    color: #31363b;
-    font-size: 28px;
-    font-weight: 800;
-    margin-bottom: 30px;
+  color: #31363b;
+  font-size: 28px;
+  font-weight: 800;
+  margin-bottom: 30px;
 }
 
 .powered-by {
-    color: #888888;
-    font-size: 14px;
-    margin-bottom: 20px;
+  color: #888888;
+  font-size: 14px;
+  margin-bottom: 20px;
 }
 
 .error-text {
-    color: #0082c9;
-    font-size: 14px;
+  color: #0082c9;
+  font-size: 14px;
 }
 
 .search-entry {
-    background-color: #ffffff;
-    color: #333333;
-    border: 1px solid #dcdcdc;
-    border-radius: 8px;
-    padding: 12px;
+  background-color: #ffffff;
+  color: #333333;
+  border: 1px solid #dcdcdc;
+  border-radius: 8px;
+  padding: 12px;
 }
 
 .search-entry:focus {
-    border-color: #0082c9;
+  border-color: #0082c9;
 }
 
 button.suggested-action {
-    background-color: #0082c9;
-    background-image: none;
-    background: #0082c9;
-    color: #ffffff;
-    font-weight: bold;
-    border-radius: 10px;
-    padding: 12px 40px;
-    border: none;
-    box-shadow: none;
+  background-color: #0082c9;
+  background-image: none;
+  background: #0082c9;
+  color: #ffffff;
+  font-weight: bold;
+  border-radius: 10px;
+  padding: 12px 40px;
+  border: none;
+  box-shadow: none;
 }
 
 button.suggested-action:active {
-    background-color: #006ea1;
+  background-color: #006ea1;
 }
 
 button.secondary-action {
-    background-color: #f0f0f0;
-    background-image: none;
-    background: #f0f0f0;
-    color: #444444;
-    font-weight: 500;
-    border-radius: 10px;
-    padding: 12px 40px;
-    border-width: 0;
-    box-shadow: none;
+  background-color: #f0f0f0;
+  background-image: none;
+  background: #f0f0f0;
+  color: #444444;
+  font-weight: 500;
+  border-radius: 10px;
+  padding: 12px 40px;
+  border-width: 0;
+  box-shadow: none;
 }
 
 button.secondary-action:active {
-    background-color: #e0e0e0;
+  background-color: #e0e0e0;
 }
 
 /* Material Design Spinner */
 .spinner-container {
-    padding: 20px;
+  padding: 20px;
 }
 
 .material-spinner {
-    color: #9e9e9e;
-    opacity: 1;
-    animation: spinner-rotate 1.4s linear infinite;
+  color: #9e9e9e;
+  opacity: 1;
+  animation: spinner-rotate 1.4s linear infinite;
 }
 
 @keyframes spinner-rotate {
-    0% {
-        transform: rotate(0deg);
-    }
+  0% {
+    transform: rotate(0deg);
+  }
 
-    100% {
-        transform: rotate(360deg);
-    }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 /* GTK Spinner color override - light gray */
 spinner.material-spinner {
-    color: #9e9e9e;
+  color: #9e9e9e;
 }
 
 spinner.material-spinner:checked {
-    color: #9e9e9e;
+  color: #9e9e9e;
 }
 
 /* Modal Styles */
 .modal-dimmer {
-    background-color: rgba(0, 0, 0, 0);
-    transition: background-color 100ms ease-out;
+  background-color: rgba(0, 0, 0, 0);
+  transition: background-color 100ms ease-out;
 }
 
 .modal-visible {
-    background-color: rgba(0, 0, 0, 0.5);
+  background-color: rgba(0, 0, 0, 0.5);
 }
 
 .modal-content {
-    background-color: white;
-    border-radius: 12px;
-    padding: 24px;
-    min-width: 280px;
-    opacity: 0;
-    transform: scale(0.5);
-    transition: transform 100ms cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 100ms ease-out;
+  background-color: white;
+  border-radius: 12px;
+  padding: 24px;
+  min-width: 280px;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: transform 100ms cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 100ms ease-out;
 }
 
 .modal-scale-in {
-    opacity: 1;
-    transform: scale(1);
+  opacity: 1;
+  transform: scale(1);
 }
 
 .modal-button {
-    background: white;
-    border: none;
-    box-shadow: none;
-    padding: 12px;
-    border-radius: 8px;
-    font-weight: 500;
-    color: #333;
+  background: white;
+  border: none;
+  box-shadow: none;
+  padding: 12px;
+  border-radius: 8px;
+  font-weight: 500;
+  color: #333;
 }
 
 .modal-button:active {
-    background: #f0f0f0;
+  background: #f0f0f0;
 }
 
 .text-danger {
-    color: #e53935;
+  color: #e53935;
 }
 
 .modal-title {
-    font-size: 18px;
-    font-weight: 800;
-    color: #333;
-    opacity: 0.8;
+  font-size: 18px;
+  font-weight: 800;
+  color: #333;
+  opacity: 0.8;
 }
 
 .modal-btn-secondary {
-    background-color: #f0f0f0;
-    color: #444444;
+  background-color: #f0f0f0;
+  color: #444444;
 }
 
 .modal-btn-secondary:active {
-    background-color: #e0e0e0;
+  background-color: #e0e0e0;
+}
+
+/* Sync indicator bubble */
+.sync-bubble {
+  background-color: #f1b30d;
+  border-radius: 50%;
+  min-width: 14px;
+  min-height: 14px;
+  margin-top: 6px;
+  margin-right: 20px;
 }
