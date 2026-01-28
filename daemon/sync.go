@@ -3,7 +3,6 @@ package daemon
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"log"
 	"nextcloud-gtk/internal/nextcloud"
@@ -17,6 +16,37 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// SyncAction represents the action to take for a file
+type SyncAction int
+
+const (
+	ActionNone SyncAction = iota
+	ActionUpload
+	ActionDownload
+	ActionDeleteLocal
+	ActionDeleteRemote
+	ActionConflict
+)
+
+func (a SyncAction) String() string {
+	switch a {
+	case ActionNone:
+		return "none"
+	case ActionUpload:
+		return "upload"
+	case ActionDownload:
+		return "download"
+	case ActionDeleteLocal:
+		return "delete_local"
+	case ActionDeleteRemote:
+		return "delete_remote"
+	case ActionConflict:
+		return "conflict"
+	default:
+		return "unknown"
+	}
+}
+
 // SyncEvent represents a sync operation result
 type SyncEvent struct {
 	Path      string
@@ -25,12 +55,19 @@ type SyncEvent struct {
 	Error     error
 }
 
-// pendingOp represents a pending filesystem operation detected by the watcher
-type pendingOp struct {
-	path     string
-	isDelete bool
-	isRename bool
-	isCreate bool
+// localFileState holds info about a local file
+type localFileState struct {
+	hash    string
+	modTime int64
+	isDir   bool
+}
+
+// syncTask represents a single sync operation to execute
+type syncTask struct {
+	relPath    string
+	action     SyncAction
+	localState *localFileState
+	remoteFile *nextcloud.FileInfo
 }
 
 // SyncManager handles file synchronization between local and remote
@@ -38,7 +75,6 @@ type SyncManager struct {
 	client      *nextcloud.Client
 	eventChan   chan SyncEvent
 	stopChan    chan struct{}
-	watcher     *fsnotify.Watcher
 	watchers    map[int64]*fsnotify.Watcher
 	watchersMux sync.RWMutex
 	isRunning   bool
@@ -77,12 +113,21 @@ func (sm *SyncManager) markFileSyncing(relPath string, syncing bool) {
 	}
 }
 
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
+// withRetry executes an operation with exponential backoff retry
+func (sm *SyncManager) withRetry(op func() error) error {
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := op(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			log.Printf("Retry attempt %d failed: %v", attempt+1, err)
+		}
+		time.Sleep(backoff)
+		backoff *= 2
 	}
-	return b
+	return lastErr
 }
 
 // Start begins the sync process
@@ -97,13 +142,8 @@ func (sm *SyncManager) Start() {
 	sm.isRunning = true
 	log.Println("Starting sync manager")
 
-	// Start remote polling goroutine
 	go sm.remotePollingLoop()
-
-	// Start tombstone cleanup goroutine
 	go sm.tombstoneCleanupLoop()
-
-	// Start initial sync for all folders
 	go sm.SyncAllFolders()
 }
 
@@ -119,7 +159,6 @@ func (sm *SyncManager) Stop() {
 	sm.isRunning = false
 	close(sm.stopChan)
 
-	// Close all watchers
 	sm.watchersMux.Lock()
 	for _, watcher := range sm.watchers {
 		watcher.Close()
@@ -133,6 +172,57 @@ func (sm *SyncManager) Stop() {
 // GetEventChannel returns the channel for sync events
 func (sm *SyncManager) GetEventChannel() <-chan SyncEvent {
 	return sm.eventChan
+}
+
+// decideSyncAction determines what action to take for a file based on state
+func decideSyncAction(localHash, remoteETag string, localExists, remoteExists bool, record *storage.SyncRecord) SyncAction {
+	var knownLocalHash, knownRemoteETag string
+	if record != nil && !record.Deleted {
+		knownLocalHash = record.LocalHash
+		knownRemoteETag = record.RemoteETag
+	}
+
+	localChanged := localExists && localHash != knownLocalHash
+	remoteChanged := remoteExists && remoteETag != knownRemoteETag
+
+	// Both deleted
+	if !localExists && !remoteExists {
+		return ActionNone
+	}
+
+	// Only remote exists
+	if !localExists && remoteExists {
+		if knownLocalHash == "" && knownRemoteETag == "" {
+			return ActionDownload // New remote file
+		}
+		if remoteETag == knownRemoteETag {
+			return ActionDeleteRemote // Local was deleted, propagate
+		}
+		return ActionDownload // Conflict: local deleted, remote modified - restore
+	}
+
+	// Only local exists
+	if localExists && !remoteExists {
+		if knownLocalHash == "" && knownRemoteETag == "" {
+			return ActionUpload // New local file
+		}
+		if localHash == knownLocalHash {
+			return ActionDeleteLocal // Remote was deleted, propagate
+		}
+		return ActionUpload // Conflict: remote deleted, local modified - upload
+	}
+
+	// Both exist
+	if !localChanged && !remoteChanged {
+		return ActionNone
+	}
+	if localChanged && !remoteChanged {
+		return ActionUpload
+	}
+	if !localChanged && remoteChanged {
+		return ActionDownload
+	}
+	return ActionConflict // Both changed
 }
 
 // computeFileHash computes SHA256 hash of file contents
@@ -157,26 +247,6 @@ func computeHashForContent(content []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// getLocalFileInfo returns file info and hash for a local file
-func getLocalFileInfo(path string) (hash string, modTime int64, exists bool) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", 0, false
-	}
-
-	if info.IsDir() {
-		return "", info.ModTime().Unix(), true
-	}
-
-	hash, err = computeFileHash(path)
-	if err != nil {
-		log.Printf("Failed to compute hash for %s: %v", path, err)
-		return "", info.ModTime().Unix(), true
-	}
-
-	return hash, info.ModTime().Unix(), true
-}
-
 // SyncAllFolders performs sync for all configured folders
 func (sm *SyncManager) SyncAllFolders() {
 	folders, err := storage.GetSyncFolders()
@@ -186,7 +256,6 @@ func (sm *SyncManager) SyncAllFolders() {
 	}
 
 	for _, folder := range folders {
-		// Setup filesystem watcher for this folder (only if not already watching)
 		sm.watchersMux.RLock()
 		_, alreadyWatching := sm.watchers[folder.ID]
 		sm.watchersMux.RUnlock()
@@ -195,186 +264,342 @@ func (sm *SyncManager) SyncAllFolders() {
 			go sm.setupFolderWatcher(folder)
 		}
 
-		// Perform initial sync
 		sm.syncFolder(folder)
 	}
 }
 
-// uploadTask represents a file that needs to be uploaded
-type uploadTask struct {
-	folder  storage.SyncFolder
-	relPath string
-}
+// gatherLocalState walks the local directory and returns file states
+func gatherLocalState(localPath string) (map[string]*localFileState, error) {
+	files := make(map[string]*localFileState)
 
-// syncFolder performs a full sync of a single folder
-func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
-	log.Printf("Starting sync for folder: %s -> %s", folder.RemotePath, folder.LocalPath)
-
-	// Get all files and directories in local directory
-	localFiles := make(map[string]bool)
-	localDirs := make(map[string]bool)
-	err := filepath.Walk(folder.LocalPath, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(localPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		relPath, err := filepath.Rel(folder.LocalPath, path)
+		relPath, err := filepath.Rel(localPath, path)
 		if err != nil {
 			return err
 		}
 		relPath = filepath.ToSlash(relPath)
 
-		if info.IsDir() {
-			// Skip the root directory itself
-			if relPath != "." {
-				localDirs[relPath] = true
+		if relPath == "." {
+			return nil
+		}
+
+		if isIgnoredFile(relPath) {
+			if info.IsDir() {
+				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		localFiles[relPath] = true
+		state := &localFileState{
+			modTime: info.ModTime().Unix(),
+			isDir:   info.IsDir(),
+		}
+
+		if !info.IsDir() {
+			hash, err := computeFileHash(path)
+			if err != nil {
+				log.Printf("Failed to compute hash for %s: %v", path, err)
+			} else {
+				state.hash = hash
+			}
+		}
+
+		files[relPath] = state
 		return nil
 	})
-	if err != nil {
-		log.Printf("Failed to walk local directory %s: %v", folder.LocalPath, err)
+
+	return files, err
+}
+
+// gatherRemoteState fetches all remote files recursively
+func (sm *SyncManager) gatherRemoteState(remotePath string) (map[string]nextcloud.FileInfo, map[string]bool, error) {
+	files := make(map[string]nextcloud.FileInfo)
+	dirs := make(map[string]bool)
+
+	var gather func(rPath, prefix string) error
+	gather = func(rPath, prefix string) error {
+		fileList, err := sm.client.ListFiles(rPath)
+		if err != nil {
+			return err
+		}
+
+		for _, file := range fileList {
+			relPath := filepath.ToSlash(filepath.Join(prefix, file.Name))
+
+			if file.Type == "dir" {
+				if relPath != "." && relPath != "" {
+					dirs[relPath] = true
+				}
+				if err := gather(rPath+"/"+file.Name, relPath); err != nil {
+					return err
+				}
+			} else {
+				files[relPath] = file
+			}
+		}
+		return nil
 	}
 
-	// Get all files and directories from remote
-	remoteFiles, remoteDirs, err := sm.listRemoteFilesRecursive(folder.RemotePath)
+	err := gather(remotePath, "")
+	return files, dirs, err
+}
+
+// gatherSyncRecords loads all sync records for a folder into a map
+func gatherSyncRecords(folderID int64) (map[string]*storage.SyncRecord, error) {
+	records, err := storage.GetSyncRecordsForFolder(folderID)
 	if err != nil {
-		log.Printf("Failed to list remote files for %s: %v", folder.RemotePath, err)
+		return nil, err
+	}
+
+	result := make(map[string]*storage.SyncRecord)
+	for i := range records {
+		result[records[i].RelativePath] = &records[i]
+	}
+	return result, nil
+}
+
+// syncFolder performs a full sync of a single folder using the 3-phase approach
+func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
+	log.Printf("Starting sync for folder: %s -> %s", folder.RemotePath, folder.LocalPath)
+
+	// Phase 1: Gather all state
+	localFiles, err := gatherLocalState(folder.LocalPath)
+	if err != nil {
+		log.Printf("Failed to gather local state for %s: %v", folder.LocalPath, err)
+	}
+
+	remoteFiles, remoteDirs, err := sm.gatherRemoteState(folder.RemotePath)
+	if err != nil {
+		log.Printf("Failed to gather remote state for %s: %v", folder.RemotePath, err)
 		return
 	}
 
-	// Union of all paths
+	syncRecords, err := gatherSyncRecords(folder.ID)
+	if err != nil {
+		log.Printf("Failed to gather sync records for folder %d: %v", folder.ID, err)
+		return
+	}
+
+	// Phase 2: Detect renames and compute actions
+	renames := sm.detectRemoteRenames(folder, localFiles, remoteFiles, syncRecords)
+
+	// Apply renames first
+	for oldPath, newPath := range renames {
+		oldRecord := syncRecords[oldPath]
+		localHash := sm.applyLocalRename(folder, oldPath, newPath, remoteFiles[newPath], oldRecord)
+
+		// Update local state after rename
+		if state, exists := localFiles[oldPath]; exists {
+			delete(localFiles, oldPath)
+			localFiles[newPath] = state
+		}
+
+		// Update sync records map to reflect the rename
+		delete(syncRecords, oldPath)
+		syncRecords[newPath] = &storage.SyncRecord{
+			FolderID:     folder.ID,
+			RelativePath: newPath,
+			LocalHash:    localHash,
+			RemoteETag:   remoteFiles[newPath].ETag,
+			Deleted:      false,
+		}
+	}
+
+	// Build union of all paths
 	allPaths := make(map[string]bool)
 	for path := range localFiles {
-		allPaths[path] = true
+		if localFiles[path] != nil && !localFiles[path].isDir {
+			allPaths[path] = true
+		}
 	}
 	for path := range remoteFiles {
 		allPaths[path] = true
 	}
-
-	// First pass: detect and handle remote renames before any deletions
-	sm.handleRemoteRenames(folder, localFiles, remoteFiles)
-
-	// Refresh local files list after renames
-	localFiles = make(map[string]bool)
-	filepath.Walk(folder.LocalPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
+	for path, record := range syncRecords {
+		if !record.Deleted {
+			allPaths[path] = true
 		}
-		relPath, _ := filepath.Rel(folder.LocalPath, path)
-		localFiles[filepath.ToSlash(relPath)] = true
-		return nil
-	})
+	}
 
-	// Collect uploads and process other operations
-	var uploadTasks []uploadTask
+	// Compute actions for each file
+	var uploads, downloads, deleteLocals, deleteRemotes, conflicts []syncTask
 
-	// Sync each file
 	for relPath := range allPaths {
-		needsUpload := sm.checkAndPrepareSync(folder, relPath, &uploadTasks)
-		if !needsUpload {
-			// Process non-upload operations immediately
-			sm.syncFile(folder, relPath)
+		if sm.isFileSyncing(relPath) {
+			continue
+		}
+
+		// Skip if this was part of a rename
+		if _, wasRenamed := renames[relPath]; wasRenamed {
+			continue
+		}
+
+		var localHash string
+		var localExists bool
+		if state, ok := localFiles[relPath]; ok && state != nil {
+			localHash = state.hash
+			localExists = true
+		}
+
+		var remoteETag string
+		var remoteExists bool
+		remoteFile, ok := remoteFiles[relPath]
+		if ok {
+			remoteETag = remoteFile.ETag
+			remoteExists = true
+		}
+
+		record := syncRecords[relPath]
+		action := decideSyncAction(localHash, remoteETag, localExists, remoteExists, record)
+
+		if action == ActionNone {
+			continue
+		}
+
+		task := syncTask{
+			relPath:    relPath,
+			action:     action,
+			remoteFile: &remoteFile,
+		}
+		if state, ok := localFiles[relPath]; ok {
+			task.localState = state
+		}
+
+		switch action {
+		case ActionUpload:
+			uploads = append(uploads, task)
+		case ActionDownload:
+			downloads = append(downloads, task)
+		case ActionDeleteLocal:
+			deleteLocals = append(deleteLocals, task)
+		case ActionDeleteRemote:
+			deleteRemotes = append(deleteRemotes, task)
+		case ActionConflict:
+			conflicts = append(conflicts, task)
 		}
 	}
 
-	// Process uploads concurrently (up to 5 at a time)
-	if len(uploadTasks) > 0 {
-		log.Printf("Processing %d uploads concurrently (max 5 at a time)", len(uploadTasks))
-		sm.processUploadsConcurrently(uploadTasks)
+	log.Printf("Sync plan: %d uploads, %d downloads, %d local deletes, %d remote deletes, %d conflicts",
+		len(uploads), len(downloads), len(deleteLocals), len(deleteRemotes), len(conflicts))
+
+	// Phase 3: Execute actions
+	sm.executeUploads(folder, uploads)
+	sm.executeDownloads(folder, downloads)
+
+	for _, task := range deleteLocals {
+		sm.executeDeleteLocal(folder, task.relPath)
+	}
+	for _, task := range deleteRemotes {
+		sm.executeDeleteRemote(folder, task.relPath)
+	}
+	for _, task := range conflicts {
+		sm.executeConflictResolution(folder, task.relPath, task.remoteFile)
 	}
 
-	// Delete empty local directories that don't exist remotely
+	// Cleanup empty local directories
+	localDirs := make(map[string]bool)
+	for path, state := range localFiles {
+		if state != nil && state.isDir {
+			localDirs[path] = true
+		}
+	}
 	sm.cleanupEmptyDirectories(folder, localDirs, remoteDirs)
 
 	log.Printf("Completed sync for folder: %s", folder.RemotePath)
 }
 
-// checkAndPrepareSync checks if a file needs upload and adds it to the task list
-// Returns true if the file needs upload (and was added to tasks), false otherwise
-func (sm *SyncManager) checkAndPrepareSync(folder storage.SyncFolder, relPath string, tasks *[]uploadTask) bool {
-	// Skip if already being synced
-	if sm.isFileSyncing(relPath) {
-		return false
-	}
+// detectRemoteRenames finds files that were renamed on remote
+func (sm *SyncManager) detectRemoteRenames(folder storage.SyncFolder, localFiles map[string]*localFileState, remoteFiles map[string]nextcloud.FileInfo, syncRecords map[string]*storage.SyncRecord) map[string]string {
+	renames := make(map[string]string)
 
-	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
-
-	// Skip directories
-	info, err := os.Stat(localPath)
-	if err == nil && info.IsDir() {
-		return false
-	}
-
-	// Get local file info
-	localHash, _, localExists := getLocalFileInfo(localPath)
-	if !localExists {
-		return false
-	}
-
-	// Get remote file info
-	remoteFile, remoteExists := sm.getRemoteFileInfo(folder.RemotePath, relPath)
-	var remoteHash string
-	if remoteExists {
-		remoteHash = remoteFile.ETag
-	}
-
-	// Get sync record
-	syncRecord, err := storage.GetSyncRecord(folder.ID, relPath)
-	if err != nil {
-		return false
-	}
-
-	var knownLocalHash, knownRemoteETag string
-	if syncRecord != nil && !syncRecord.Deleted {
-		knownLocalHash = syncRecord.LocalHash
-		knownRemoteETag = syncRecord.RemoteETag
-	}
-
-	// Decision matrix - compare separately
-	localChanged := localExists && localHash != knownLocalHash
-	remoteChanged := remoteExists && remoteHash != knownRemoteETag
-
-	// Check if upload is needed
-	if localExists && !remoteExists {
-		if knownLocalHash == "" && knownRemoteETag == "" {
-			// New local file - upload
-			*tasks = append(*tasks, uploadTask{folder: folder, relPath: relPath})
-			return true
-		} else if localHash != knownLocalHash {
-			// Conflict: remote deleted, local modified - upload
-			*tasks = append(*tasks, uploadTask{folder: folder, relPath: relPath})
-			return true
+	// Build ETag -> old path map for files that exist locally but not remotely
+	etagToOldPath := make(map[string]string)
+	for relPath, record := range syncRecords {
+		if record.Deleted || record.RemoteETag == "" {
+			continue
+		}
+		// Local exists but remote doesn't at this path
+		if _, localExists := localFiles[relPath]; localExists {
+			if _, remoteExists := remoteFiles[relPath]; !remoteExists {
+				etagToOldPath[record.RemoteETag] = relPath
+			}
 		}
 	}
 
-	// Both exist - check if upload needed
-	if localChanged && !remoteChanged {
-		// Upload local → remote
-		*tasks = append(*tasks, uploadTask{folder: folder, relPath: relPath})
-		return true
+	// Check if any remote file has matching ETag
+	for remotePath, remoteFile := range remoteFiles {
+		if remoteFile.ETag == "" {
+			continue
+		}
+		// Skip if already tracked
+		if record, exists := syncRecords[remotePath]; exists && !record.Deleted {
+			continue
+		}
+		if oldPath, found := etagToOldPath[remoteFile.ETag]; found && oldPath != remotePath {
+			renames[oldPath] = remotePath
+			log.Printf("Detected remote rename: %s -> %s", oldPath, remotePath)
+			delete(etagToOldPath, remoteFile.ETag)
+		}
 	}
 
-	if localChanged && remoteChanged {
-		// Conflict - upload
-		*tasks = append(*tasks, uploadTask{folder: folder, relPath: relPath})
-		return true
-	}
-
-	return false
+	return renames
 }
 
-// processUploadsConcurrently processes upload tasks concurrently with max 5 workers
-func (sm *SyncManager) processUploadsConcurrently(tasks []uploadTask) {
+// applyLocalRename renames a local file to match a remote rename
+// Returns the local hash of the renamed file for updating in-memory state
+func (sm *SyncManager) applyLocalRename(folder storage.SyncFolder, oldPath, newPath string, remoteFile nextcloud.FileInfo, oldRecord *storage.SyncRecord) string {
+	sm.markFileSyncing(oldPath, true)
+	sm.markFileSyncing(newPath, true)
+	defer sm.markFileSyncing(oldPath, false)
+	defer sm.markFileSyncing(newPath, false)
+
+	oldLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(oldPath))
+	newLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(newPath))
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
+		log.Printf("Failed to create directory for rename %s: %v", newPath, err)
+		return ""
+	}
+
+	if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
+		log.Printf("Failed to rename %s to %s: %v", oldPath, newPath, err)
+		return ""
+	}
+
+	// Preserve local hash from old record, or compute it
+	localHash := ""
+	if oldRecord != nil {
+		localHash = oldRecord.LocalHash
+	}
+	if localHash == "" {
+		if h, err := computeFileHash(newLocalPath); err == nil {
+			localHash = h
+		}
+	}
+
+	// Update sync records
+	storage.SaveSyncRecord(folder.ID, oldPath, "", "", time.Now().Unix(), true)
+	storage.SaveSyncRecord(folder.ID, newPath, localHash, remoteFile.ETag, time.Now().Unix(), false)
+
+	log.Printf("Applied local rename: %s -> %s", oldPath, newPath)
+	return localHash
+}
+
+// executeUploads runs uploads concurrently with a worker pool
+func (sm *SyncManager) executeUploads(folder storage.SyncFolder, tasks []syncTask) {
+	if len(tasks) == 0 {
+		return
+	}
+
 	const maxWorkers = 5
-
 	var wg sync.WaitGroup
-	taskChan := make(chan uploadTask, len(tasks))
+	taskChan := make(chan syncTask, len(tasks))
 
-	// Start workers
 	numWorkers := maxWorkers
 	if len(tasks) < numWorkers {
 		numWorkers = len(tasks)
@@ -385,327 +610,59 @@ func (sm *SyncManager) processUploadsConcurrently(tasks []uploadTask) {
 		go func(workerID int) {
 			defer wg.Done()
 			for task := range taskChan {
-				log.Printf("Worker %d: Uploading %s", workerID, task.relPath)
-				sm.uploadFile(task.folder, task.relPath)
+				sm.executeUpload(folder, task.relPath)
 			}
 		}(i)
 	}
 
-	// Queue tasks
 	for _, task := range tasks {
 		taskChan <- task
 	}
 	close(taskChan)
 
-	// Wait for all uploads to complete
 	wg.Wait()
 	log.Printf("Completed %d uploads", len(tasks))
 }
 
-// listRemoteFilesRecursive recursively lists all files and directories in a remote directory
-func (sm *SyncManager) listRemoteFilesRecursive(remotePath string) (map[string]nextcloud.FileInfo, map[string]bool, error) {
-	files := make(map[string]nextcloud.FileInfo)
-	dirs := make(map[string]bool)
-	err := sm.listRemoteFilesRecursiveHelper(remotePath, "", files, dirs)
-	return files, dirs, err
-}
-
-func (sm *SyncManager) listRemoteFilesRecursiveHelper(remotePath, relPrefix string, files map[string]nextcloud.FileInfo, dirs map[string]bool) error {
-	fileList, err := sm.client.ListFiles(remotePath)
-	if err != nil {
-		return err
+// executeDownloads runs downloads concurrently with a worker pool
+func (sm *SyncManager) executeDownloads(folder storage.SyncFolder, tasks []syncTask) {
+	if len(tasks) == 0 {
+		return
 	}
 
-	for _, file := range fileList {
-		relPath := filepath.ToSlash(filepath.Join(relPrefix, file.Name))
+	const maxWorkers = 5
+	var wg sync.WaitGroup
+	taskChan := make(chan syncTask, len(tasks))
 
-		if file.Type == "dir" {
-			// Track the directory
-			if relPath != "." && relPath != "" {
-				dirs[relPath] = true
+	numWorkers := maxWorkers
+	if len(tasks) < numWorkers {
+		numWorkers = len(tasks)
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for task := range taskChan {
+				sm.executeDownload(folder, task.relPath, task.remoteFile)
 			}
-			err := sm.listRemoteFilesRecursiveHelper(
-				remotePath+"/"+file.Name,
-				relPath,
-				files,
-				dirs,
-			)
-			if err != nil {
-				return err
-			}
-		} else {
-			files[relPath] = file
-		}
+		}(i)
 	}
 
-	return nil
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+
+	wg.Wait()
+	log.Printf("Completed %d downloads", len(tasks))
 }
 
-// syncFile syncs a single file based on the decision matrix
-func (sm *SyncManager) syncFile(folder storage.SyncFolder, relPath string) {
-	// Skip if already being synced
-	if sm.isFileSyncing(relPath) {
-		return
-	}
-
-	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
-
-	// Skip directories
-	info, err := os.Stat(localPath)
-	if err == nil && info.IsDir() {
-		return
-	}
-
-	// Get local file info
-	localHash, _, localExists := getLocalFileInfo(localPath)
-
-	// Get remote file info
-	remoteFile, remoteExists := sm.getRemoteFileInfo(folder.RemotePath, relPath)
-	var remoteHash string
-	if remoteExists {
-		remoteHash = remoteFile.ETag // Using ETag as hash
-	}
-
-	// Get sync record
-	syncRecord, err := storage.GetSyncRecord(folder.ID, relPath)
-	if err != nil {
-		log.Printf("Failed to get sync record for %s: %v", relPath, err)
-		return
-	}
-
-	var knownLocalHash, knownRemoteETag string
-	if syncRecord != nil && !syncRecord.Deleted {
-		knownLocalHash = syncRecord.LocalHash
-		knownRemoteETag = syncRecord.RemoteETag
-	}
-
-	// Decision matrix - compare separately
-	localChanged := localExists && localHash != knownLocalHash
-	remoteChanged := remoteExists && remoteHash != knownRemoteETag
-
-	log.Printf("Sync check for %s: local=%v (hash=%s, known=%s), remote=%v (etag=%s, known=%s)",
-		relPath, localExists, localHash[:min(8, len(localHash))], knownLocalHash[:min(8, len(knownLocalHash))],
-		remoteExists, remoteHash[:min(8, len(remoteHash))], knownRemoteETag[:min(8, len(knownRemoteETag))])
-
-	// Handle deletions
-	if !localExists && !remoteExists {
-		// Both deleted - clean up record if it exists
-		if syncRecord != nil {
-			storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
-		}
-		return
-	}
-
-	if !localExists && remoteExists {
-		if knownLocalHash == "" && knownRemoteETag == "" {
-			// New remote file - download
-			log.Printf("Downloading new remote file: %s", relPath)
-			sm.downloadFile(folder, relPath, remoteFile)
-		} else if remoteHash == knownRemoteETag {
-			// Local deletion - propagate to remote
-			log.Printf("Local deletion detected, deleting remote: %s", relPath)
-			sm.deleteRemoteFile(folder, relPath)
-		} else {
-			// Conflict: local deleted, remote modified
-			log.Printf("Conflict (local deleted, remote modified): %s", relPath)
-			// Default to restoring remote version
-			sm.downloadFile(folder, relPath, remoteFile)
-		}
-		return
-	}
-
-	if localExists && !remoteExists {
-		if knownLocalHash == "" && knownRemoteETag == "" {
-			// New local file - upload
-			log.Printf("Uploading new local file: %s", relPath)
-			sm.uploadFile(folder, relPath)
-		} else if localHash == knownLocalHash {
-			// Remote deletion - check if it was renamed before deleting
-			if !sm.wasFileRenamed(folder, relPath, knownRemoteETag) {
-				log.Printf("Remote deletion detected, deleting local: %s", relPath)
-				sm.deleteLocalFile(folder, relPath)
-			} else {
-				log.Printf("File %s was renamed remotely, skipping deletion", relPath)
-			}
-		} else {
-			// Conflict: remote deleted, local modified
-			log.Printf("Conflict (remote deleted, local modified): %s", relPath)
-			// Default to uploading local version
-			sm.uploadFile(folder, relPath)
-		}
-		return
-	}
-
-	// Both exist - apply decision matrix
-	if !localChanged && !remoteChanged {
-		// No changes
-		return
-	}
-
-	if localChanged && !remoteChanged {
-		// Upload local → remote
-		log.Printf("Uploading modified local file: %s", relPath)
-		sm.uploadFile(folder, relPath)
-		return
-	}
-
-	if !localChanged && remoteChanged {
-		// Download remote → local
-		log.Printf("Downloading modified remote file: %s", relPath)
-		sm.downloadFile(folder, relPath, remoteFile)
-		return
-	}
-
-	// Both changed - conflict
-	log.Printf("Conflict detected for %s (local and remote both modified)", relPath)
-	sm.handleConflict(folder, relPath, localPath, remoteFile)
-}
-
-// wasFileRenamed checks if a file with the given ETag exists at a different remote path
-func (sm *SyncManager) wasFileRenamed(folder storage.SyncFolder, relPath string, oldETag string) bool {
-	if oldETag == "" {
-		return false
-	}
-
-	// List all remote files and check if any have the same ETag
-	remoteFiles, _, err := sm.listRemoteFilesRecursive(folder.RemotePath)
-	if err != nil {
-		return false
-	}
-
-	for path, remoteFile := range remoteFiles {
-		if path != relPath && remoteFile.ETag == oldETag {
-			log.Printf("Found file %s with matching ETag %s... at remote path %s", relPath, oldETag[:min(8, len(oldETag))], path)
-			return true
-		}
-	}
-
-	return false
-}
-
-// handleRemoteRenames detects and handles remote file renames
-// Before deleting a local file because it no longer exists remotely,
-// check if it was renamed by looking for the same ETag at a different path
-func (sm *SyncManager) handleRemoteRenames(folder storage.SyncFolder, localFiles map[string]bool, remoteFiles map[string]nextcloud.FileInfo) {
-	log.Printf("Checking for remote renames in folder %s", folder.RemotePath)
-
-	// Get all sync records for this folder to check ETags
-	records, err := storage.GetSyncRecordsForFolder(folder.ID)
-	if err != nil {
-		log.Printf("Failed to get sync records for rename detection: %v", err)
-		return
-	}
-
-	log.Printf("Found %d sync records for rename detection", len(records))
-
-	// Build a map of ETag to sync record for files that exist locally but not remotely
-	etagToOldPath := make(map[string]string)
-	for _, record := range records {
-		if record.Deleted || record.RemoteETag == "" {
-			continue
-		}
-		// Check if local file exists but remote doesn't
-		localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(record.RelativePath))
-		if _, err := os.Stat(localPath); err == nil {
-			// Local file exists
-			if _, remoteExists := remoteFiles[record.RelativePath]; !remoteExists {
-				// But not remotely - might be a rename
-				etagToOldPath[record.RemoteETag] = record.RelativePath
-				log.Printf("Rename candidate: %s (ETag: %s...)", record.RelativePath, record.RemoteETag[:min(8, len(record.RemoteETag))])
-			}
-		}
-	}
-
-	log.Printf("Found %d rename candidates", len(etagToOldPath))
-
-	// Now check if any remote file has an ETag matching a missing local file
-	for remotePath, remoteFile := range remoteFiles {
-		// Skip if this path already has a sync record (not a rename candidate)
-		existingRecord, _ := storage.GetSyncRecord(folder.ID, remotePath)
-		if existingRecord != nil && !existingRecord.Deleted {
-			continue // Already tracked, not a rename
-		}
-
-		if remoteFile.ETag == "" {
-			continue
-		}
-
-		// Check if this ETag matches a file that no longer exists remotely
-		if oldPath, found := etagToOldPath[remoteFile.ETag]; found && oldPath != remotePath {
-			log.Printf("ETag match found! Old: %s, New: %s, ETag: %s...", oldPath, remotePath, remoteFile.ETag[:min(8, len(remoteFile.ETag))])
-
-			// Mark both paths as syncing to prevent filesystem watcher from triggering
-			sm.markFileSyncing(oldPath, true)
-			sm.markFileSyncing(remotePath, true)
-			defer sm.markFileSyncing(oldPath, false)
-			defer sm.markFileSyncing(remotePath, false)
-
-			// Found a match! Rename local file instead of deleting/redownloading
-			oldLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(oldPath))
-			newLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(remotePath))
-
-			// Ensure parent directory exists
-			newDir := filepath.Dir(newLocalPath)
-			if err := os.MkdirAll(newDir, 0755); err != nil {
-				log.Printf("Failed to create directory for rename %s: %v", newDir, err)
-				continue
-			}
-
-			// Perform the rename
-			if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
-				log.Printf("Failed to rename %s to %s: %v", oldPath, remotePath, err)
-				continue
-			}
-
-			// Update sync record: delete old, create new
-			storage.SaveSyncRecord(folder.ID, oldPath, "", "", time.Now().Unix(), true)
-			storage.SaveSyncRecord(folder.ID, remotePath, "", remoteFile.ETag, time.Now().Unix(), false)
-
-			log.Printf("Remote rename detected: %s -> %s (ETag: %s)", oldPath, remotePath, remoteFile.ETag[:min(8, len(remoteFile.ETag))])
-
-			// Remove from etag map so we don't process it again
-			delete(etagToOldPath, remoteFile.ETag)
-		}
-	}
-}
-
-// getRemoteFileInfo retrieves file info from remote
-func (sm *SyncManager) getRemoteFileInfo(folderRemotePath, relPath string) (nextcloud.FileInfo, bool) {
-	files, _, err := sm.listRemoteFilesRecursive(folderRemotePath)
-	if err != nil {
-		return nextcloud.FileInfo{}, false
-	}
-
-	file, exists := files[relPath]
-	return file, exists
-}
-
-// remotePathExists checks if a path (file or directory) exists remotely
-func (sm *SyncManager) remotePathExists(folderRemotePath, relPath string) (isFile bool, isDir bool) {
-	files, dirs, err := sm.listRemoteFilesRecursive(folderRemotePath)
-	if err != nil {
-		return false, false
-	}
-
-	// Check if it's a file
-	if _, exists := files[relPath]; exists {
-		return true, false
-	}
-
-	// Check if it's a directory
-	if dirs[relPath] {
-		return false, true
-	}
-
-	return false, false
-}
-
-// uploadFile uploads a local file to remote
-func (sm *SyncManager) uploadFile(folder storage.SyncFolder, relPath string) {
+// executeUpload uploads a single file with retry
+func (sm *SyncManager) executeUpload(folder storage.SyncFolder, relPath string) {
 	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
 	remotePath := folder.RemotePath + "/" + relPath
 
-	// Mark file as syncing to ignore self-triggered filesystem events
 	sm.markFileSyncing(relPath, true)
 	defer sm.markFileSyncing(relPath, false)
 
@@ -724,45 +681,47 @@ func (sm *SyncManager) uploadFile(folder storage.SyncFolder, relPath string) {
 		sm.client.MkdirAll(dir)
 	}
 
-	err = sm.client.UploadFile(remotePath, content)
+	err = sm.withRetry(func() error {
+		return sm.client.UploadFile(remotePath, content)
+	})
 	if err != nil {
 		log.Printf("Failed to upload file %s: %v", remotePath, err)
 		sm.eventChan <- SyncEvent{Path: relPath, Operation: "upload", Success: false, Error: err}
 		return
 	}
 
-	// Get the remote file info to obtain the ETag
-	remoteFile, remoteExists := sm.getRemoteFileInfo(folder.RemotePath, relPath)
+	// Get the new remote ETag
+	remoteFiles, _, _ := sm.gatherRemoteState(folder.RemotePath)
 	var remoteETag string
-	if remoteExists && remoteFile.Name != "" {
-		remoteETag = remoteFile.ETag
+	if rf, ok := remoteFiles[relPath]; ok {
+		remoteETag = rf.ETag
 	}
 
-	// Update sync record with both local hash and remote ETag
 	info, _ := os.Stat(localPath)
 	modTime := time.Now().Unix()
 	if info != nil {
 		modTime = info.ModTime().Unix()
 	}
 
-	err = storage.SaveSyncRecord(folder.ID, relPath, hash, remoteETag, modTime, false)
-	if err != nil {
-		log.Printf("Failed to save sync record for %s: %v", relPath, err)
-	}
+	storage.SaveSyncRecord(folder.ID, relPath, hash, remoteETag, modTime, false)
 
-	log.Printf("Successfully uploaded: %s (local_hash=%s..., remote_etag=%s...)", relPath, hash[:min(8, len(hash))], remoteETag[:min(8, len(remoteETag))])
+	log.Printf("Uploaded: %s", relPath)
 	sm.eventChan <- SyncEvent{Path: relPath, Operation: "upload", Success: true}
 }
 
-// downloadFile downloads a remote file to local
-func (sm *SyncManager) downloadFile(folder storage.SyncFolder, relPath string, remoteFile nextcloud.FileInfo) {
+// executeDownload downloads a single file with retry
+func (sm *SyncManager) executeDownload(folder storage.SyncFolder, relPath string, remoteFile *nextcloud.FileInfo) {
 	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
 
-	// Mark file as syncing to ignore self-triggered filesystem events
 	sm.markFileSyncing(relPath, true)
 	defer sm.markFileSyncing(relPath, false)
 
-	content, err := sm.client.DownloadFile(folder.RemotePath + "/" + relPath)
+	var content []byte
+	err := sm.withRetry(func() error {
+		var err error
+		content, err = sm.client.DownloadFile(folder.RemotePath + "/" + relPath)
+		return err
+	})
 	if err != nil {
 		log.Printf("Failed to download file %s: %v", relPath, err)
 		sm.eventChan <- SyncEvent{Path: relPath, Operation: "download", Success: false, Error: err}
@@ -772,79 +731,81 @@ func (sm *SyncManager) downloadFile(folder storage.SyncFolder, relPath string, r
 	hash := computeHashForContent(content)
 
 	// Ensure parent directory exists locally
-	dir := filepath.Dir(localPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("Failed to create directory %s: %v", dir, err)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		log.Printf("Failed to create directory for %s: %v", localPath, err)
 		sm.eventChan <- SyncEvent{Path: relPath, Operation: "download", Success: false, Error: err}
 		return
 	}
 
-	err = os.WriteFile(localPath, content, 0644)
-	if err != nil {
+	if err := os.WriteFile(localPath, content, 0644); err != nil {
 		log.Printf("Failed to write local file %s: %v", localPath, err)
 		sm.eventChan <- SyncEvent{Path: relPath, Operation: "download", Success: false, Error: err}
 		return
 	}
 
-	// Update sync record with both local hash and remote ETag
-	err = storage.SaveSyncRecord(folder.ID, relPath, hash, remoteFile.ETag, time.Now().Unix(), false)
-	if err != nil {
-		log.Printf("Failed to save sync record for %s: %v", relPath, err)
+	var etag string
+	if remoteFile != nil {
+		etag = remoteFile.ETag
 	}
+	storage.SaveSyncRecord(folder.ID, relPath, hash, etag, time.Now().Unix(), false)
 
-	log.Printf("Successfully downloaded: %s (local_hash=%s..., remote_etag=%s...)", relPath, hash[:min(8, len(hash))], remoteFile.ETag[:min(8, len(remoteFile.ETag))])
+	log.Printf("Downloaded: %s", relPath)
 	sm.eventChan <- SyncEvent{Path: relPath, Operation: "download", Success: true}
 }
 
-// deleteLocalFile deletes a local file
-func (sm *SyncManager) deleteLocalFile(folder storage.SyncFolder, relPath string) {
+// executeDeleteLocal deletes a local file
+func (sm *SyncManager) executeDeleteLocal(folder storage.SyncFolder, relPath string) {
 	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
 
-	// Mark as syncing to prevent filesystem watcher from triggering
 	sm.markFileSyncing(relPath, true)
 	defer sm.markFileSyncing(relPath, false)
 
-	err := os.Remove(localPath)
-	if err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("Failed to delete local file %s: %v", localPath, err)
 		sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_local", Success: false, Error: err}
 		return
 	}
 
-	// Update sync record as tombstone
-	err = storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
-	if err != nil {
-		log.Printf("Failed to save sync record for %s: %v", relPath, err)
-	}
+	storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
 
-	log.Printf("Deleted local file: %s", relPath)
+	log.Printf("Deleted local: %s", relPath)
 	sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_local", Success: true}
 }
 
-// createRemoteDir creates a directory on the remote server
-func (sm *SyncManager) createRemoteDir(folder storage.SyncFolder, relPath string) {
+// executeDeleteRemote deletes a remote file
+func (sm *SyncManager) executeDeleteRemote(folder storage.SyncFolder, relPath string) {
 	remotePath := folder.RemotePath + "/" + relPath
-	log.Printf("Creating remote directory: %s", relPath)
 
-	err := sm.client.MkdirAll(remotePath)
+	err := sm.withRetry(func() error {
+		return sm.client.DeleteFile(remotePath)
+	})
 	if err != nil {
-		log.Printf("Failed to create remote directory %s: %v", remotePath, err)
+		log.Printf("Failed to delete remote file %s: %v", remotePath, err)
+		sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: false, Error: err}
 		return
 	}
 
-	log.Printf("Successfully created remote directory: %s", relPath)
+	storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
+
+	log.Printf("Deleted remote: %s", relPath)
+	sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: true}
+}
+
+// executeConflictResolution resolves a conflict (currently: remote wins)
+func (sm *SyncManager) executeConflictResolution(folder storage.SyncFolder, relPath string, remoteFile *nextcloud.FileInfo) {
+	log.Printf("Resolving conflict by downloading remote version: %s", relPath)
+	sm.executeDownload(folder, relPath, remoteFile)
+	sm.eventChan <- SyncEvent{Path: relPath, Operation: "conflict", Success: true}
 }
 
 // cleanupEmptyDirectories removes local directories that are empty and don't exist remotely
 func (sm *SyncManager) cleanupEmptyDirectories(folder storage.SyncFolder, localDirs, remoteDirs map[string]bool) {
-	// Sort directories by depth (deepest first) so we delete children before parents
 	type dirInfo struct {
 		path  string
 		depth int
 	}
 	var dirs []dirInfo
 	for dir := range localDirs {
-		// Check if directory exists remotely
 		if remoteDirs[dir] {
 			continue
 		}
@@ -852,7 +813,7 @@ func (sm *SyncManager) cleanupEmptyDirectories(folder storage.SyncFolder, localD
 		dirs = append(dirs, dirInfo{path: dir, depth: depth})
 	}
 
-	// Sort by depth descending
+	// Sort by depth descending (deepest first)
 	for i := 0; i < len(dirs); i++ {
 		for j := i + 1; j < len(dirs); j++ {
 			if dirs[j].depth > dirs[i].depth {
@@ -861,211 +822,142 @@ func (sm *SyncManager) cleanupEmptyDirectories(folder storage.SyncFolder, localD
 		}
 	}
 
-	// Try to delete empty directories
-	for _, dirInfo := range dirs {
-		dirPath := filepath.Join(folder.LocalPath, filepath.FromSlash(dirInfo.path))
-
-		// Check if directory is empty
+	for _, d := range dirs {
+		dirPath := filepath.Join(folder.LocalPath, filepath.FromSlash(d.path))
 		entries, err := os.ReadDir(dirPath)
 		if err != nil {
 			continue
 		}
-
-		// Only delete if empty
 		if len(entries) == 0 {
 			if err := os.Remove(dirPath); err == nil {
-				log.Printf("Deleted empty local directory: %s", dirInfo.path)
-				// Mark as syncing to prevent filesystem watcher issues
-				sm.markFileSyncing(dirInfo.path, true)
-				defer sm.markFileSyncing(dirInfo.path, false)
+				log.Printf("Deleted empty local directory: %s", d.path)
 			}
 		}
 	}
 }
 
-// deleteRemoteFile deletes a remote file
-func (sm *SyncManager) deleteRemoteFile(folder storage.SyncFolder, relPath string) {
-	remotePath := folder.RemotePath + "/" + relPath
-
-	err := sm.client.DeleteFile(remotePath)
-	if err != nil {
-		log.Printf("Failed to delete remote file %s: %v", remotePath, err)
-		sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: false, Error: err}
+// syncFileForLocalChange handles a local file create/write event
+// This is conservative: it only uploads, never deletes local files
+// This prevents the case where stale remote state causes incorrect deletions
+func (sm *SyncManager) syncFileForLocalChange(folder storage.SyncFolder, relPath string, remoteFiles map[string]nextcloud.FileInfo) {
+	if sm.isFileSyncing(relPath) {
 		return
 	}
 
-	// Update sync record as tombstone
-	err = storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
+	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
+
+	// Check if file exists
+	info, err := os.Stat(localPath)
 	if err != nil {
-		log.Printf("Failed to save sync record for %s: %v", relPath, err)
-	}
-
-	log.Printf("Deleted remote file: %s", relPath)
-	sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: true}
-}
-
-// deleteRemoteDirectory deletes a remote directory recursively with a single WebDAV call
-func (sm *SyncManager) deleteRemoteDirectory(folder storage.SyncFolder, relPath string) {
-	remotePath := folder.RemotePath + "/" + relPath
-
-	// Mark as syncing to prevent filesystem watcher issues
-	sm.markFileSyncing(relPath, true)
-	defer sm.markFileSyncing(relPath, false)
-
-	log.Printf("Deleting remote directory recursively: %s", relPath)
-
-	// WebDAV DELETE on a directory recursively deletes all contents
-	err := sm.client.DeleteFile(remotePath)
-	if err != nil {
-		log.Printf("Failed to delete remote directory %s: %v", remotePath, err)
-		sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: false, Error: err}
+		log.Printf("File no longer exists, skipping: %s", relPath)
 		return
 	}
 
-	// Update sync record as tombstone
-	err = storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
-	if err != nil {
-		log.Printf("Failed to save sync record for %s: %v", relPath, err)
+	// Check if it's a directory
+	if info.IsDir() {
+		return
 	}
 
-	log.Printf("Deleted remote directory: %s", relPath)
-	sm.eventChan <- SyncEvent{Path: relPath, Operation: "delete_remote", Success: true}
+	// Get local hash
+	localHash, err := computeFileHash(localPath)
+	if err != nil {
+		log.Printf("Failed to compute hash for %s: %v", relPath, err)
+		return
+	}
+
+	// Get sync record to check if already synced with same content
+	record, _ := storage.GetSyncRecord(folder.ID, relPath)
+	if record != nil && !record.Deleted && record.LocalHash == localHash {
+		// File hasn't changed from what we have recorded, skip
+		log.Printf("File unchanged from record, skipping: %s", relPath)
+		return
+	}
+
+	// For local changes, always upload if the file exists and has changed
+	log.Printf("Uploading local change: %s", relPath)
+	sm.executeUpload(folder, relPath)
 }
 
-// handleConflict handles sync conflicts
-func (sm *SyncManager) handleConflict(folder storage.SyncFolder, relPath, localPath string, remoteFile nextcloud.FileInfo) {
-	// For now, use "last writer wins" strategy with remote priority
-	// TODO: Implement proper conflict resolution UI
-	log.Printf("Resolving conflict by downloading remote version: %s", relPath)
-	sm.downloadFile(folder, relPath, remoteFile)
-	sm.eventChan <- SyncEvent{Path: relPath, Operation: "conflict", Success: true}
+// syncFile syncs a single file (used by full folder sync)
+func (sm *SyncManager) syncFile(folder storage.SyncFolder, relPath string, remoteFiles map[string]nextcloud.FileInfo) {
+	if sm.isFileSyncing(relPath) {
+		return
+	}
+
+	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
+
+	// Check if it's a directory
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		return
+	}
+
+	// Get local state
+	var localHash string
+	var localExists bool
+	if _, err := os.Stat(localPath); err == nil {
+		localExists = true
+		if h, err := computeFileHash(localPath); err == nil {
+			localHash = h
+		}
+	}
+
+	// Get remote state
+	var remoteETag string
+	var remoteExists bool
+	var remoteFile nextcloud.FileInfo
+	if rf, ok := remoteFiles[relPath]; ok {
+		remoteETag = rf.ETag
+		remoteExists = true
+		remoteFile = rf
+	}
+
+	// Get sync record
+	record, _ := storage.GetSyncRecord(folder.ID, relPath)
+
+	action := decideSyncAction(localHash, remoteETag, localExists, remoteExists, record)
+
+	switch action {
+	case ActionUpload:
+		sm.executeUpload(folder, relPath)
+	case ActionDownload:
+		sm.executeDownload(folder, relPath, &remoteFile)
+	case ActionDeleteLocal:
+		sm.executeDeleteLocal(folder, relPath)
+	case ActionDeleteRemote:
+		sm.executeDeleteRemote(folder, relPath)
+	case ActionConflict:
+		sm.executeConflictResolution(folder, relPath, &remoteFile)
+	}
 }
 
-// handleLocalDelete handles a file or directory deletion detected by the filesystem watcher
-func (sm *SyncManager) handleLocalDelete(folder storage.SyncFolder, relPath string) {
+// handleLocalDelete handles a local file deletion from the watcher
+func (sm *SyncManager) handleLocalDelete(folder storage.SyncFolder, relPath string, remoteFiles map[string]nextcloud.FileInfo, remoteDirs map[string]bool) {
 	log.Printf("Handling local deletion for: %s", relPath)
 
-	// Check if remote path exists (file or directory)
-	isRemoteFile, isRemoteDir := sm.remotePathExists(folder.RemotePath, relPath)
-	remoteExists := isRemoteFile || isRemoteDir
-
-	if !remoteExists {
-		log.Printf("Path %s deleted locally and doesn't exist remotely - nothing to do", relPath)
-		return
-	}
-
-	// Path exists remotely - check sync record
-	syncRecord, err := storage.GetSyncRecord(folder.ID, relPath)
-	if err != nil {
-		log.Printf("Failed to get sync record for %s: %v", relPath, err)
-		return
-	}
-
-	// Check if this was a previously synced item
-	wasSynced := syncRecord != nil && !syncRecord.Deleted
-
-	if isRemoteDir {
-		// Handle directory deletion - just do a recursive delete
-		log.Printf("Propagating local directory deletion to remote: %s", relPath)
-		sm.deleteRemoteDirectory(folder, relPath)
-	} else {
-		// Handle file deletion
-		if wasSynced {
-			log.Printf("Propagating local file deletion to remote: %s", relPath)
-			sm.deleteRemoteFile(folder, relPath)
+	// Check if it's a remote directory
+	if remoteDirs[relPath] {
+		log.Printf("Deleting remote directory: %s", relPath)
+		remotePath := folder.RemotePath + "/" + relPath
+		if err := sm.client.DeleteFile(remotePath); err != nil {
+			log.Printf("Failed to delete remote directory %s: %v", relPath, err)
 		} else {
-			log.Printf("Remote file %s exists but was not synced - creating tombstone", relPath)
 			storage.SaveSyncRecord(folder.ID, relPath, "", "", time.Now().Unix(), true)
 		}
-	}
-}
-
-// detectLocalRenames checks if any of the pending changes represent a local rename
-// Returns a map of oldPath -> newPath for detected renames
-func (sm *SyncManager) detectLocalRenames(folder storage.SyncFolder, changes []pendingOp) map[string]string {
-	renames := make(map[string]string)
-
-	// Look for patterns: a delete/rename followed by a create
-	var deleteOps []pendingOp
-	var createOps []pendingOp
-
-	for _, op := range changes {
-		if op.isDelete || op.isRename {
-			deleteOps = append(deleteOps, op)
-		}
-		if op.isCreate {
-			createOps = append(createOps, op)
-		}
-	}
-
-	// For each deleted file, check if there's a new file with the same content hash
-	for _, delOp := range deleteOps {
-		syncRecord, err := storage.GetSyncRecord(folder.ID, delOp.path)
-		if err != nil || syncRecord == nil || syncRecord.Deleted {
-			continue
-		}
-
-		// Check if any newly created file has the same hash
-		for _, createOp := range createOps {
-			// Skip if already mapped
-			if _, exists := renames[delOp.path]; exists {
-				continue
-			}
-
-			// Check if new file exists and has same hash
-			newLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(createOp.path))
-			if _, err := os.Stat(newLocalPath); err != nil {
-				continue
-			}
-
-			newHash, _, _ := getLocalFileInfo(newLocalPath)
-			if newHash == syncRecord.LocalHash && newHash != "" {
-				// Found a match! This is a rename
-				renames[delOp.path] = createOp.path
-				log.Printf("Detected local rename: %s -> %s (hash: %s...)",
-					delOp.path, createOp.path, newHash[:min(8, len(newHash))])
-				break
-			}
-		}
-	}
-
-	return renames
-}
-
-// handleLocalRename handles a local file rename by renaming the file on remote
-func (sm *SyncManager) handleLocalRename(folder storage.SyncFolder, oldPath, newPath string) {
-	log.Printf("Handling local rename: %s -> %s", oldPath, newPath)
-
-	// Get sync record for old path
-	syncRecord, err := storage.GetSyncRecord(folder.ID, oldPath)
-	if err != nil || syncRecord == nil {
-		log.Printf("No sync record found for old path %s, treating as separate operations", oldPath)
 		return
 	}
 
-	// Check if remote file exists at old path
-	_, remoteExists := sm.getRemoteFileInfo(folder.RemotePath, oldPath)
-	if !remoteExists {
-		log.Printf("Remote file %s doesn't exist, treating as separate operations", oldPath)
+	// Check if remote file exists
+	if _, exists := remoteFiles[relPath]; !exists {
+		log.Printf("Path %s deleted locally and doesn't exist remotely", relPath)
 		return
 	}
 
-	// Perform remote rename using WebDAV MOVE
-	oldRemotePath := folder.RemotePath + "/" + oldPath
-	newRemotePath := folder.RemotePath + "/" + newPath
-
-	// Move on remote
-	if err := sm.client.MoveFile(oldRemotePath, newRemotePath); err != nil {
-		log.Printf("Failed to rename remote file %s to %s: %v", oldPath, newPath, err)
-		// Fall back to separate operations
-		return
+	// Check sync record
+	record, _ := storage.GetSyncRecord(folder.ID, relPath)
+	if record != nil && !record.Deleted {
+		log.Printf("Propagating local deletion to remote: %s", relPath)
+		sm.executeDeleteRemote(folder, relPath)
 	}
-
-	// Update sync records
-	storage.SaveSyncRecord(folder.ID, oldPath, "", "", time.Now().Unix(), true)
-	storage.SaveSyncRecord(folder.ID, newPath, syncRecord.LocalHash, syncRecord.RemoteETag, time.Now().Unix(), false)
-
-	log.Printf("Successfully renamed remote: %s -> %s", oldPath, newPath)
 }
 
 // setupFolderWatcher sets up filesystem watcher for a folder
@@ -1080,7 +972,7 @@ func (sm *SyncManager) setupFolderWatcher(folder storage.SyncFolder) {
 	sm.watchers[folder.ID] = watcher
 	sm.watchersMux.Unlock()
 
-	// Walk directory and add all subdirectories to watcher
+	// Add all directories to watcher
 	err = filepath.Walk(folder.LocalPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1097,206 +989,291 @@ func (sm *SyncManager) setupFolderWatcher(folder storage.SyncFolder) {
 
 	log.Printf("Started watching folder: %s", folder.LocalPath)
 
-	// Process events
-	go func() {
-		debounceTimer := time.NewTimer(0)
-		<-debounceTimer.C
+	go sm.watcherLoop(folder, watcher)
+}
 
-		var pendingChanges []pendingOp
-		var mux sync.Mutex
+// pendingOp represents a pending filesystem operation
+type pendingOp struct {
+	path     string
+	isDelete bool
+	isRename bool
+	isCreate bool
+	isWrite  bool
+}
 
-		for {
-			select {
-			case <-sm.stopChan:
-				watcher.Close()
-				return
+// watcherLoop handles filesystem events with proper debouncing
+func (sm *SyncManager) watcherLoop(folder storage.SyncFolder, watcher *fsnotify.Watcher) {
+	var pendingChanges []pendingOp
+	var changesMux sync.Mutex
+	var debounceTimer *time.Timer
+	var timerMux sync.Mutex
 
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
+	processChanges := func() {
+		changesMux.Lock()
+		changes := make([]pendingOp, len(pendingChanges))
+		copy(changes, pendingChanges)
+		pendingChanges = pendingChanges[:0]
+		changesMux.Unlock()
+
+		if len(changes) == 0 {
+			return
+		}
+
+		// Deduplicate: keep only the latest event per path, merging flags
+		pathToOp := make(map[string]*pendingOp)
+		for _, op := range changes {
+			if existing, ok := pathToOp[op.path]; ok {
+				// Merge flags
+				existing.isDelete = existing.isDelete || op.isDelete
+				existing.isRename = existing.isRename || op.isRename
+				existing.isCreate = existing.isCreate || op.isCreate
+				existing.isWrite = existing.isWrite || op.isWrite
+			} else {
+				opCopy := op
+				pathToOp[op.path] = &opCopy
+			}
+		}
+
+		// Convert back to slice
+		changes = make([]pendingOp, 0, len(pathToOp))
+		for _, op := range pathToOp {
+			// If both create and delete happened, check if file exists now
+			if op.isCreate && op.isDelete {
+				localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(op.path))
+				if _, err := os.Stat(localPath); err == nil {
+					// File exists now, treat as create/modify only
+					op.isDelete = false
+				} else {
+					// File doesn't exist, treat as delete only
+					op.isCreate = false
 				}
+			}
+			changes = append(changes, *op)
+		}
 
-				// Add new directories to watcher
-				if event.Op&fsnotify.Create == fsnotify.Create {
-					info, err := os.Stat(event.Name)
-					if err == nil && info.IsDir() {
-						watcher.Add(event.Name)
-					}
-				}
+		log.Printf("Processing %d local changes (after dedup)", len(changes))
 
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
-					relPath, err := filepath.Rel(folder.LocalPath, event.Name)
-					if err == nil && !isIgnoredFile(relPath) {
-						// Check if it's a directory
-						info, err := os.Stat(event.Name)
-						if err == nil && info.IsDir() {
-							// Handle directory creation separately
-							if event.Op&fsnotify.Create == fsnotify.Create {
-								watcher.Add(event.Name)
-								log.Printf("Added new directory to watcher: %s", relPath)
-								// Create directory on remote
-								go sm.createRemoteDir(folder, relPath)
-							}
-							continue
-						}
+		// Fetch current remote state once for all changes
+		remoteFiles, remoteDirs, err := sm.gatherRemoteState(folder.RemotePath)
+		if err != nil {
+			log.Printf("Failed to fetch remote state: %v", err)
+			return
+		}
 
-						// Skip files that are currently being synced by us
-						if sm.isFileSyncing(filepath.ToSlash(relPath)) {
-							log.Printf("Skipping self-triggered change for: %s", relPath)
-							continue
-						}
+		// Detect local renames
+		renameMap := sm.detectLocalRenamesFromChanges(folder, changes)
 
-						mux.Lock()
-						op := pendingOp{path: filepath.ToSlash(relPath)}
-						if event.Op&fsnotify.Remove == fsnotify.Remove {
-							op.isDelete = true
-							log.Printf("Detected local file deletion: %s", relPath)
-						}
-						if event.Op&fsnotify.Rename == fsnotify.Rename {
-							op.isRename = true
-							log.Printf("Detected local file rename: %s", relPath)
-						}
-						if event.Op&fsnotify.Create == fsnotify.Create {
-							op.isCreate = true
-							log.Printf("Detected local file create: %s", relPath)
-						}
-						pendingChanges = append(pendingChanges, op)
-						mux.Unlock()
-						debounceTimer.Reset(100 * time.Millisecond)
-					}
-				}
+		// Process renames first
+		for oldPath, newPath := range renameMap {
+			sm.handleLocalRename(folder, oldPath, newPath)
+		}
 
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Printf("Watcher error: %v", err)
+		// Build deleted paths set
+		deletedPaths := make(map[string]bool)
+		deletedDirs := make(map[string]bool)
+		for _, op := range changes {
+			if op.isDelete {
+				deletedPaths[op.path] = true
+			}
+		}
 
-			case <-debounceTimer.C:
-				mux.Lock()
-				changes := make([]pendingOp, len(pendingChanges))
-				copy(changes, pendingChanges)
-				pendingChanges = pendingChanges[:0]
-				mux.Unlock()
-
-				if len(changes) > 0 {
-					log.Printf("Processing %d local changes", len(changes))
-
-					// First pass: detect local renames
-					renameMap := sm.detectLocalRenames(folder, changes)
-
-					// Process renames first
-					for oldPath, newPath := range renameMap {
-						sm.handleLocalRename(folder, oldPath, newPath)
-					}
-
-					// Build a set of all deleted paths and identify directories
-					deletedPaths := make(map[string]bool)
-					for _, op := range changes {
-						if op.isDelete {
-							deletedPaths[op.path] = true
-						}
-					}
-
-					// Identify which deleted paths are directories vs files
-					// A path is a directory if:
-					// 1. It has no "/" in it (top-level), OR
-					// 2. It's a parent of another deleted path
-					deletedDirs := make(map[string]bool)
-					for path := range deletedPaths {
-						// Check if this path is a parent of any other deleted path
-						isDir := false
-						for otherPath := range deletedPaths {
-							if otherPath != path && strings.HasPrefix(otherPath, path+"/") {
-								isDir = true
-								break
-							}
-						}
-						// Also check if it's a directory by trying to stat it (might fail if already deleted)
-						if !isDir {
-							fullPath := filepath.Join(folder.LocalPath, filepath.FromSlash(path))
-							if info, err := os.Stat(fullPath); err == nil && info.IsDir() {
-								isDir = true
-							}
-						}
-						if isDir {
-							deletedDirs[path] = true
-						}
-					}
-
-					// Sort changes: process directory deletions first, then files
-					// Skip files that are inside a deleted directory
-					var dirDeletions, fileDeletions, otherChanges []pendingOp
-					for _, op := range changes {
-						// Skip if this was part of a rename
-						if _, wasRenamed := renameMap[op.path]; wasRenamed {
-							continue
-						}
-						isNewPath := false
-						for _, newPath := range renameMap {
-							if op.path == newPath {
-								isNewPath = true
-								break
-							}
-						}
-						if isNewPath {
-							continue
-						}
-
-						// Check if this path is inside a deleted directory
-						insideDeletedDir := false
-						for dirPath := range deletedDirs {
-							if strings.HasPrefix(op.path, dirPath+"/") {
-								insideDeletedDir = true
-								log.Printf("Skipping %s as it's inside deleted directory %s", op.path, dirPath)
-								break
-							}
-						}
-						if insideDeletedDir {
-							continue
-						}
-
-						if op.isDelete {
-							if deletedDirs[op.path] {
-								dirDeletions = append(dirDeletions, op)
-							} else {
-								fileDeletions = append(fileDeletions, op)
-							}
-						} else {
-							otherChanges = append(otherChanges, op)
-						}
-					}
-
-					// Process directory deletions first (depth-first, deepest first)
-					for i := 0; i < len(dirDeletions); i++ {
-						for j := i + 1; j < len(dirDeletions); j++ {
-							if strings.Count(dirDeletions[j].path, "/") > strings.Count(dirDeletions[i].path, "/") {
-								dirDeletions[i], dirDeletions[j] = dirDeletions[j], dirDeletions[i]
-							}
-						}
-					}
-
-					for _, op := range dirDeletions {
-						log.Printf("Processing directory deletion: %s", op.path)
-						sm.handleLocalDelete(folder, op.path)
-					}
-
-					// Process file deletions
-					for _, op := range fileDeletions {
-						sm.handleLocalDelete(folder, op.path)
-					}
-
-					// Process other changes (creates, writes)
-					for _, op := range otherChanges {
-						sm.syncFile(folder, op.path)
-					}
+		// Identify directories
+		for path := range deletedPaths {
+			for otherPath := range deletedPaths {
+				if otherPath != path && strings.HasPrefix(otherPath, path+"/") {
+					deletedDirs[path] = true
+					break
 				}
 			}
 		}
-	}()
+
+		// Process changes
+		for _, op := range changes {
+			// Skip if part of a rename
+			if _, wasRenamed := renameMap[op.path]; wasRenamed {
+				continue
+			}
+			isNewPath := false
+			for _, newPath := range renameMap {
+				if op.path == newPath {
+					isNewPath = true
+					break
+				}
+			}
+			if isNewPath {
+				continue
+			}
+
+			// Skip files inside deleted directories
+			insideDeletedDir := false
+			for dirPath := range deletedDirs {
+				if strings.HasPrefix(op.path, dirPath+"/") {
+					insideDeletedDir = true
+					break
+				}
+			}
+			if insideDeletedDir {
+				continue
+			}
+
+			if op.isDelete {
+				sm.handleLocalDelete(folder, op.path, remoteFiles, remoteDirs)
+			} else {
+				// For create/write events, only allow upload - never delete local
+				sm.syncFileForLocalChange(folder, op.path, remoteFiles)
+			}
+		}
+	}
+
+	resetDebounce := func() {
+		timerMux.Lock()
+		defer timerMux.Unlock()
+		if debounceTimer != nil {
+			debounceTimer.Stop()
+		}
+		debounceTimer = time.AfterFunc(100*time.Millisecond, processChanges)
+	}
+
+	for {
+		select {
+		case <-sm.stopChan:
+			watcher.Close()
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			// Add new directories to watcher
+			if event.Op&fsnotify.Create == fsnotify.Create {
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+					watcher.Add(event.Name)
+				}
+			}
+
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+				relPath, err := filepath.Rel(folder.LocalPath, event.Name)
+				if err != nil || isIgnoredFile(relPath) {
+					continue
+				}
+
+				// Skip directories for file events (except creates)
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+					if event.Op&fsnotify.Create == fsnotify.Create {
+						log.Printf("New directory created: %s", relPath)
+						sm.client.MkdirAll(folder.RemotePath + "/" + relPath)
+					}
+					continue
+				}
+
+				// Skip self-triggered changes
+				if sm.isFileSyncing(filepath.ToSlash(relPath)) {
+					continue
+				}
+
+				changesMux.Lock()
+				op := pendingOp{path: filepath.ToSlash(relPath)}
+				if event.Op&fsnotify.Remove == fsnotify.Remove {
+					op.isDelete = true
+				}
+				if event.Op&fsnotify.Rename == fsnotify.Rename {
+					op.isRename = true
+				}
+				if event.Op&fsnotify.Create == fsnotify.Create {
+					op.isCreate = true
+				}
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					op.isWrite = true
+				}
+				pendingChanges = append(pendingChanges, op)
+				changesMux.Unlock()
+
+				resetDebounce()
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("Watcher error: %v", err)
+		}
+	}
 }
 
-// remotePollingLoop polls remote for changes every 60 seconds
+// detectLocalRenamesFromChanges detects renames from a batch of filesystem changes
+func (sm *SyncManager) detectLocalRenamesFromChanges(folder storage.SyncFolder, changes []pendingOp) map[string]string {
+	renames := make(map[string]string)
+
+	var deleteOps, createOps []pendingOp
+	for _, op := range changes {
+		if op.isDelete || op.isRename {
+			deleteOps = append(deleteOps, op)
+		}
+		if op.isCreate {
+			createOps = append(createOps, op)
+		}
+	}
+
+	for _, delOp := range deleteOps {
+		record, err := storage.GetSyncRecord(folder.ID, delOp.path)
+		if err != nil || record == nil || record.Deleted {
+			continue
+		}
+
+		for _, createOp := range createOps {
+			if _, exists := renames[delOp.path]; exists {
+				continue
+			}
+
+			newLocalPath := filepath.Join(folder.LocalPath, filepath.FromSlash(createOp.path))
+			if _, err := os.Stat(newLocalPath); err != nil {
+				continue
+			}
+
+			newHash, err := computeFileHash(newLocalPath)
+			if err != nil {
+				continue
+			}
+
+			if newHash == record.LocalHash && newHash != "" {
+				renames[delOp.path] = createOp.path
+				log.Printf("Detected local rename: %s -> %s", delOp.path, createOp.path)
+				break
+			}
+		}
+	}
+
+	return renames
+}
+
+// handleLocalRename handles a local file rename
+func (sm *SyncManager) handleLocalRename(folder storage.SyncFolder, oldPath, newPath string) {
+	log.Printf("Handling local rename: %s -> %s", oldPath, newPath)
+
+	record, err := storage.GetSyncRecord(folder.ID, oldPath)
+	if err != nil || record == nil {
+		log.Printf("No sync record for %s, treating as separate operations", oldPath)
+		return
+	}
+
+	// Move on remote
+	oldRemotePath := folder.RemotePath + "/" + oldPath
+	newRemotePath := folder.RemotePath + "/" + newPath
+
+	if err := sm.client.MoveFile(oldRemotePath, newRemotePath); err != nil {
+		log.Printf("Failed to rename remote %s to %s: %v", oldPath, newPath, err)
+		return
+	}
+
+	// Update sync records
+	storage.SaveSyncRecord(folder.ID, oldPath, "", "", time.Now().Unix(), true)
+	storage.SaveSyncRecord(folder.ID, newPath, record.LocalHash, record.RemoteETag, time.Now().Unix(), false)
+
+	log.Printf("Renamed remote: %s -> %s", oldPath, newPath)
+}
+
+// remotePollingLoop polls remote for changes periodically
 func (sm *SyncManager) remotePollingLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -1314,7 +1291,7 @@ func (sm *SyncManager) remotePollingLoop() {
 
 // tombstoneCleanupLoop periodically cleans up old tombstones
 func (sm *SyncManager) tombstoneCleanupLoop() {
-	ticker := time.NewTicker(24 * time.Hour) // Run once per day
+	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
 	for {
@@ -1332,7 +1309,6 @@ func (sm *SyncManager) tombstoneCleanupLoop() {
 
 // isIgnoredFile checks if a file should be ignored
 func isIgnoredFile(relPath string) bool {
-	// Ignore hidden files and common temp files
 	base := filepath.Base(relPath)
 	if strings.HasPrefix(base, ".") {
 		return true
@@ -1366,24 +1342,4 @@ func (sm *SyncManager) IsRunning() bool {
 	sm.mux.RLock()
 	defer sm.mux.RUnlock()
 	return sm.isRunning
-}
-
-// SyncFolderStats holds statistics for a folder sync operation
-type SyncFolderStats struct {
-	FolderID        int64
-	RemotePath      string
-	LocalPath       string
-	FilesSynced     int
-	FilesUploaded   int
-	FilesDownloaded int
-	Conflicts       int
-	Errors          int
-}
-
-// GetFolderStats returns sync statistics for a folder
-func (sm *SyncManager) GetFolderStats(folderID int64) (*SyncFolderStats, error) {
-	// This is a placeholder - in a real implementation, you'd track these stats
-	return &SyncFolderStats{
-		FolderID: folderID,
-	}, fmt.Errorf("not implemented")
 }
