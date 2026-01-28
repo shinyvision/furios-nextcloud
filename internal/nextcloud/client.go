@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,10 +26,13 @@ type PollResponse struct {
 }
 
 type FileInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"` // "dir" or "file"
-	Path string `json:"path"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Type         string `json:"type"` // "dir" or "file"
+	Path         string `json:"path"`
+	ETag         string `json:"etag"`
+	LastModified int64  `json:"last_modified"`
+	Size         int64  `json:"size"`
 }
 
 // WebDAV PROPFIND response types
@@ -52,7 +56,10 @@ type Prop struct {
 	ResourceType struct {
 		Collection *struct{} `xml:"collection"`
 	} `xml:"resourcetype"`
-	FileID string `xml:"fileid"`
+	FileID           string `xml:"fileid"`
+	GetLastModified  string `xml:"getlastmodified"`
+	GetETag          string `xml:"getetag"`
+	GetContentLength int64  `xml:"getcontentlength"`
 }
 
 type Client struct {
@@ -102,6 +109,9 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
   <d:prop>
     <d:displayname/>
     <d:resourcetype/>
+    <d:getlastmodified/>
+    <d:getetag/>
+    <d:getcontentlength/>
     <oc:fileid/>
   </d:prop>
 </d:propfind>`
@@ -155,11 +165,23 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 			}
 		}
 
+		// Parse last modified time
+		var lastMod int64
+		if r.PropStat.Prop.GetLastModified != "" {
+			// Parse HTTP date format
+			if t, err := http.ParseTime(r.PropStat.Prop.GetLastModified); err == nil {
+				lastMod = t.Unix()
+			}
+		}
+
 		files = append(files, FileInfo{
-			ID:   r.PropStat.Prop.FileID,
-			Name: name,
-			Type: fType,
-			Path: path + "/" + name,
+			ID:           r.PropStat.Prop.FileID,
+			Name:         name,
+			Type:         fType,
+			Path:         path + "/" + name,
+			ETag:         strings.Trim(r.PropStat.Prop.GetETag, `"`),
+			LastModified: lastMod,
+			Size:         r.PropStat.Prop.GetContentLength,
 		})
 	}
 
@@ -222,4 +244,124 @@ func PollLogin(endpoint, token string) (*PollResponse, error) {
 	}
 
 	return &pr, nil
+}
+
+// UploadFile uploads content to a remote file path
+func (c *Client) UploadFile(remotePath string, content []byte) error {
+	endpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + remotePath
+
+	req, err := http.NewRequest("PUT", endpoint, strings.NewReader(string(content)))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("upload failed with status: %s", resp.Status)
+	}
+
+	return nil
+}
+
+// DownloadFile downloads content from a remote file path
+func (c *Client) DownloadFile(remotePath string) ([]byte, error) {
+	endpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + remotePath
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download failed with status: %s", resp.Status)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// DeleteFile deletes a remote file
+func (c *Client) DeleteFile(remotePath string) error {
+	endpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + remotePath
+
+	req, err := http.NewRequest("DELETE", endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("delete failed with status: %s", resp.Status)
+	}
+
+	return nil
+}
+
+// MkdirAll creates a directory and all parent directories if they don't exist
+func (c *Client) MkdirAll(remotePath string) error {
+	endpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + remotePath
+
+	req, err := http.NewRequest("MKCOL", endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 201 Created = success, 405 Method Not Allowed = already exists
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusMethodNotAllowed {
+		return fmt.Errorf("mkdir failed with status: %s", resp.Status)
+	}
+
+	return nil
+}
+
+// MoveFile renames/moves a file on the remote server
+func (c *Client) MoveFile(oldRemotePath, newRemotePath string) error {
+	oldEndpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + oldRemotePath
+	newEndpoint := c.BaseURL + "/remote.php/dav/files/" + url.PathEscape(c.Username) + newRemotePath
+
+	req, err := http.NewRequest("MOVE", oldEndpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+	req.Header.Set("Destination", newEndpoint)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 201 Created = success, 204 No Content = success (overwrite), 412 Precondition Failed = destination exists
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("move failed with status: %s", resp.Status)
+	}
+
+	return nil
 }

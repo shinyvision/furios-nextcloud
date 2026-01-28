@@ -42,6 +42,20 @@ func createTables() error {
 			local_path TEXT,
 			last_sync DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS sync_records (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			folder_id INTEGER,
+			relative_path TEXT,
+			local_hash TEXT,
+			remote_etag TEXT,
+			modified_at INTEGER,
+			deleted BOOLEAN DEFAULT 0,
+			created_at INTEGER DEFAULT (strftime('%s', 'now')),
+			FOREIGN KEY (folder_id) REFERENCES sync_folders(id) ON DELETE CASCADE,
+			UNIQUE(folder_id, relative_path)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_records_folder ON sync_records(folder_id, relative_path)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_records_deleted ON sync_records(deleted, created_at)`,
 	}
 
 	for _, q := range queries {
@@ -117,4 +131,88 @@ func AddSyncFolder(remote, local string) error {
 func RemoveSyncFolder(remotePath string) error {
 	_, err := db.Exec("DELETE FROM sync_folders WHERE remote_path = ?", remotePath)
 	return err
+}
+
+type SyncRecord struct {
+	ID           int64
+	FolderID     int64
+	RelativePath string
+	LocalHash    string // SHA256 hash of local file content
+	RemoteETag   string // ETag from Nextcloud server
+	ModifiedAt   int64
+	Deleted      bool
+	CreatedAt    int64
+}
+
+func GetSyncRecord(folderID int64, relativePath string) (*SyncRecord, error) {
+	var r SyncRecord
+	err := db.QueryRow(
+		"SELECT id, folder_id, relative_path, local_hash, remote_etag, modified_at, deleted, created_at FROM sync_records WHERE folder_id = ? AND relative_path = ?",
+		folderID, relativePath,
+	).Scan(&r.ID, &r.FolderID, &r.RelativePath, &r.LocalHash, &r.RemoteETag, &r.ModifiedAt, &r.Deleted, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func SaveSyncRecord(folderID int64, relativePath, localHash, remoteETag string, modifiedAt int64, deleted bool) error {
+	_, err := db.Exec(
+		`INSERT INTO sync_records (folder_id, relative_path, local_hash, remote_etag, modified_at, deleted) 
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(folder_id, relative_path) DO UPDATE SET
+		 local_hash = excluded.local_hash,
+		 remote_etag = excluded.remote_etag,
+		 modified_at = excluded.modified_at,
+		 deleted = excluded.deleted`,
+		folderID, relativePath, localHash, remoteETag, modifiedAt, deleted,
+	)
+	return err
+}
+
+func GetSyncRecordsForFolder(folderID int64) ([]SyncRecord, error) {
+	rows, err := db.Query(
+		"SELECT id, folder_id, relative_path, local_hash, remote_etag, modified_at, deleted, created_at FROM sync_records WHERE folder_id = ?",
+		folderID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []SyncRecord
+	for rows.Next() {
+		var r SyncRecord
+		if err := rows.Scan(&r.ID, &r.FolderID, &r.RelativePath, &r.LocalHash, &r.RemoteETag, &r.ModifiedAt, &r.Deleted, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, nil
+}
+
+func CleanupOldTombstones(retentionDays int) error {
+	_, err := db.Exec(
+		"DELETE FROM sync_records WHERE deleted = 1 AND created_at < strftime('%s', 'now', '-? days')",
+		retentionDays,
+	)
+	return err
+}
+
+func GetSyncFolderByRemotePath(remotePath string) (*SyncFolder, error) {
+	var f SyncFolder
+	err := db.QueryRow(
+		"SELECT id, remote_path, local_path FROM sync_folders WHERE remote_path = ?",
+		remotePath,
+	).Scan(&f.ID, &f.RemotePath, &f.LocalPath)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
