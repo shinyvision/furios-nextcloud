@@ -25,18 +25,14 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 	var refreshFiles func(string)
 	var spinner *gtk.Box
 
-	// Search bar
-	searchBox := gtk.NewBox(gtk.OrientationVertical, 10)
-	searchBox.SetMarginStart(15)
-	searchBox.SetMarginEnd(15)
-	searchBox.SetMarginTop(15)
-	searchBox.SetMarginBottom(15)
-	box.Append(searchBox)
-
-	searchEntry := gtk.NewEntry()
-	searchEntry.SetPlaceholderText("Search files...")
-	searchEntry.AddCSSClass("search-entry")
-	searchBox.Append(searchEntry)
+	// Track folder items and their sync status
+	type FolderItem struct {
+		widget     *gtk.Box
+		iconWidget gtk.Widgetter
+		isSynced   bool
+		folderPath string
+	}
+	folderItems := make(map[string]*FolderItem)
 
 	// Grid for files
 	grid = gtk.NewFlowBox()
@@ -75,6 +71,45 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		cloudPath = "/app/share/nextcloud-gtk/assets/icons/ui/cloud.svg"
 	}
 
+	// Helper function to update sync indicator for a folder
+	updateSyncIndicator := func(item *FolderItem, isSynced bool) {
+		if item.isSynced == isSynced {
+			return // No change needed
+		}
+		item.isSynced = isSynced
+
+		// Remove current icon widget
+		item.widget.Remove(item.iconWidget)
+
+		if isSynced {
+			// Create overlay with sync indicator
+			overlayContainer := gtk.NewOverlay()
+			overlayContainer.SetSizeRequest(48, 48)
+
+			icon := gtk.NewImageFromFile(folderPath)
+			icon.AddCSSClass("folder-icon")
+			icon.SetPixelSize(48)
+			overlayContainer.SetChild(icon)
+
+			bubble := gtk.NewBox(gtk.OrientationHorizontal, 0)
+			bubble.AddCSSClass("sync-bubble")
+			bubble.SetHAlign(gtk.AlignEnd)
+			bubble.SetVAlign(gtk.AlignStart)
+			bubble.SetSizeRequest(14, 14)
+
+			overlayContainer.AddOverlay(bubble)
+			item.widget.Prepend(overlayContainer)
+			item.iconWidget = overlayContainer
+		} else {
+			// Simple folder icon without indicator
+			icon := gtk.NewImageFromFile(folderPath)
+			icon.AddCSSClass("folder-icon")
+			icon.SetPixelSize(48)
+			item.widget.Prepend(icon)
+			item.iconWidget = icon
+		}
+	}
+
 	navigateUp := func() {
 		if currentPath == "/" {
 			return
@@ -90,6 +125,11 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 	refreshFiles = func(path string) {
 		currentPath = path
+		// Clear folder items map
+		for k := range folderItems {
+			delete(folderItems, k)
+		}
+
 		for {
 			child := grid.FirstChild()
 			if child == nil {
@@ -121,7 +161,6 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		// Build a set of synced folder paths for quick lookup
 		syncedSet := make(map[string]bool)
 		for _, sf := range syncedFolders {
-			// Store the parent path + folder name as key
 			parent := filepath.Dir(sf.RemotePath)
 			if parent == "." {
 				parent = "/"
@@ -154,7 +193,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 					fileItem := gtk.NewBox(gtk.OrientationVertical, 5)
 					fileItem.SetSizeRequest(80, 100)
 
-					var icon *gtk.Image
+					var iconWidget gtk.Widgetter
 					if f.Type == "dir" {
 						// Build full path for this folder
 						var folderFullPath string
@@ -165,18 +204,18 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 						}
 
 						// Check if this folder is synced
-						if syncedSet[folderFullPath] {
+						isSynced := syncedSet[folderFullPath]
+
+						if isSynced {
 							// Create an overlay for synced indicator
 							overlayContainer := gtk.NewOverlay()
 							overlayContainer.SetSizeRequest(48, 48)
 
-							// Folder icon
-							icon = gtk.NewImageFromFile(folderPath)
+							icon := gtk.NewImageFromFile(folderPath)
 							icon.AddCSSClass("folder-icon")
 							icon.SetPixelSize(48)
 							overlayContainer.SetChild(icon)
 
-							// Green bubble indicator
 							bubble := gtk.NewBox(gtk.OrientationHorizontal, 0)
 							bubble.AddCSSClass("sync-bubble")
 							bubble.SetHAlign(gtk.AlignEnd)
@@ -185,14 +224,24 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 							overlayContainer.AddOverlay(bubble)
 							fileItem.Append(overlayContainer)
+							iconWidget = overlayContainer
 						} else {
-							icon = gtk.NewImageFromFile(folderPath)
+							icon := gtk.NewImageFromFile(folderPath)
 							icon.AddCSSClass("folder-icon")
 							icon.SetPixelSize(48)
 							fileItem.Append(icon)
+							iconWidget = icon
+						}
+
+						// Store folder item reference
+						folderItems[folderFullPath] = &FolderItem{
+							widget:     fileItem,
+							iconWidget: iconWidget,
+							isSynced:   isSynced,
+							folderPath: folderFullPath,
 						}
 					} else {
-						icon = gtk.NewImageFromIconName("text-x-generic")
+						icon := gtk.NewImageFromIconName("text-x-generic")
 						icon.SetPixelSize(48)
 						fileItem.Append(icon)
 					}
@@ -233,9 +282,8 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 							if !pressed {
 								return
 							}
-							pressed = false // Reset logic
+							pressed = false
 
-							// Double check distance logic just in case
 							dist := math.Hypot(offsetX, offsetY)
 							if dist > 45 {
 								return
@@ -256,32 +304,35 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 						longPress := gtk.NewGestureLongPress()
 						longPress.SetTouchOnly(false)
 						longPress.Connect("pressed", func(x, y float64) {
-							// Reset pressed state so we don't also navigate
 							pressed = false
 							fileItem.RemoveCSSClass("folder-pressed")
 
-							// Open Modal
 							modal := components.NewModal(parentOverlay)
-
-							// Content
 							content := gtk.NewBox(gtk.OrientationVertical, 5)
 
-							// Title
 							title := gtk.NewLabel(folderName)
 							title.AddCSSClass("modal-title")
 							title.SetMarginBottom(10)
 							content.Append(title)
 
+							// Calculate full remote path for this folder
+							var folderFullPath string
+							if path == "/" {
+								folderFullPath = "/" + folderName
+							} else {
+								folderFullPath = path + "/" + folderName
+							}
+
+							// Look up folder item
+							folderItem := folderItems[folderFullPath]
+							isSynced := folderItem != nil && folderItem.isSynced
+
 							createBtn := func(label string, cssClass string, closeOnAction bool, action func()) {
 								btn := gtk.NewButton()
-
-								// Label
 								lbl := gtk.NewLabel(label)
 								btn.SetChild(lbl)
-
-								btn.AddCSSClass("modal-button") // Base style
-								btn.AddCSSClass(cssClass)       // Color variant
-
+								btn.AddCSSClass("modal-button")
+								btn.AddCSSClass(cssClass)
 								btn.SetHAlign(gtk.AlignFill)
 								btn.ConnectClicked(func() {
 									if closeOnAction {
@@ -294,45 +345,53 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 								content.Append(btn)
 							}
 
-							createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
-								// Create file chooser native dialog
-								dialog := gtk.NewFileChooserNative(
-									"Select Local Directory",
-									nil, // No parent window
-									gtk.FileChooserActionSelectFolder,
-									"_Select",
-									"_Cancel",
-								)
-
-								dialog.ConnectResponse(func(responseId int) {
-									if responseId == int(gtk.ResponseAccept) {
-										file := dialog.File()
-										if file != nil {
-											localPath := file.Path()
-
-											// Calculate full remote path
-											var remotePath string
-											if path == "/" {
-												remotePath = "/" + folderName
-											} else {
-												remotePath = path + "/" + folderName
-											}
-
-											// Save to database
-											err := storage.AddSyncFolder(remotePath, localPath)
-											if err != nil {
-												log.Printf("Failed to save sync folder mapping: %v", err)
-											} else {
-												log.Printf("Saved sync mapping: %s -> %s", remotePath, localPath)
-											}
+							if isSynced {
+								createBtn("Stop sync", "modal-btn-secondary", true, func() {
+									err := storage.RemoveSyncFolder(folderFullPath)
+									if err != nil {
+										log.Printf("Failed to remove sync folder mapping: %v", err)
+									} else {
+										log.Printf("Removed sync mapping for: %s", folderFullPath)
+										// Update the folder item in-place
+										if folderItem != nil {
+											updateSyncIndicator(folderItem, false)
 										}
 									}
-									dialog.Destroy()
-									modal.Hide()
 								})
+							} else {
+								createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
+									dialog := gtk.NewFileChooserNative(
+										"Select Local Directory",
+										nil,
+										gtk.FileChooserActionSelectFolder,
+										"_Select",
+										"_Cancel",
+									)
 
-								dialog.Show()
-							})
+									dialog.ConnectResponse(func(responseId int) {
+										if responseId == int(gtk.ResponseAccept) {
+											file := dialog.File()
+											if file != nil {
+												localPath := file.Path()
+												err := storage.AddSyncFolder(folderFullPath, localPath)
+												if err != nil {
+													log.Printf("Failed to save sync folder mapping: %v", err)
+												} else {
+													log.Printf("Saved sync mapping: %s -> %s", folderFullPath, localPath)
+													// Update the folder item in-place
+													if folderItem != nil {
+														updateSyncIndicator(folderItem, true)
+													}
+												}
+											}
+										}
+										dialog.Destroy()
+										modal.Hide()
+									})
+
+									dialog.Show()
+								})
+							}
 
 							createBtn("Delete folder", "modal-btn-secondary", false, func() {
 								log.Println("Delete requested for:", folderName)

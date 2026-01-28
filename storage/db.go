@@ -113,3 +113,8 @@ func AddSyncFolder(remote, local string) error {
 	_, err := db.Exec("INSERT INTO sync_folders (remote_path, local_path) VALUES (?, ?)", remote, local)
 	return err
 }
+
+func RemoveSyncFolder(remotePath string) error {
+	_, err := db.Exec("DELETE FROM sync_folders WHERE remote_path = ?", remotePath)
+	return err
+}
