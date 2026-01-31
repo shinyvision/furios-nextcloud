@@ -238,7 +238,7 @@ spinner.material-spinner:checked {
   background-color: white;
   border-radius: 12px;
   padding: 24px;
-  min-width: 280px;
+  min-width: 200px;
 }
 
 .modal-content.modal-animate-in {

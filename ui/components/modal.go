@@ -31,6 +31,9 @@ func NewModal(parentOverlay *gtk.Overlay) *Modal {
 	centerBox.SetVAlign(gtk.AlignCenter)
 	centerBox.SetHExpand(true)
 	centerBox.SetVExpand(true)
+	// Add margins so modal never touches screen edges
+	centerBox.SetMarginStart(24)
+	centerBox.SetMarginEnd(24)
 	m.container.Append(centerBox)
 
 	// Content Box - actual modal content

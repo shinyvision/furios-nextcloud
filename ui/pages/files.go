@@ -15,6 +15,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 )
 
 // truncateFileName truncates a filename to maxLen characters, adding an ellipsis
@@ -329,6 +330,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 					title := gtk.NewLabel(folderName)
 					title.AddCSSClass("modal-title")
+					title.SetEllipsize(pango.EllipsizeEnd)
 					title.SetMarginBottom(10)
 					content.Append(title)
 
@@ -531,6 +533,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 					title := gtk.NewLabel(fileName)
 					title.AddCSSClass("modal-title")
+					title.SetEllipsize(pango.EllipsizeEnd)
 					title.SetMarginBottom(10)
 					content.Append(title)
 
