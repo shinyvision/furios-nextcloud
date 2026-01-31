@@ -347,7 +347,12 @@ spinner.material-spinner:checked {
   color: #ffffff;
   padding: 2px 6px;
   min-height: 0;
+  min-width: 0;
   font-size: 14px;
+}
+
+.breadcrumb-btn label {
+  min-width: 0;
 }
 
 .breadcrumb-btn:hover {
@@ -357,4 +362,5 @@ spinner.material-spinner:checked {
 .breadcrumb-sep {
   color: rgba(255, 255, 255, 0.7);
   font-size: 14px;
+  min-width: 0;
 }

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"log"
 	"nextcloud-gtk/storage"
 	"nextcloud-gtk/ui/pages"
 	"os"
 	"strings"
 
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 )
 
 func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
@@ -48,11 +51,19 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	appIcon.SetPixelSize(32)
 	header.Append(appIcon)
 
+	// Breadcrumb clipping container - ScrolledWindow prevents breadcrumb from affecting window min-width
+	breadcrumbScroll := gtk.NewScrolledWindow()
+	breadcrumbScroll.SetHExpand(true)
+	breadcrumbScroll.SetPolicy(gtk.PolicyExternal, gtk.PolicyNever) // Hide scrollbars, clip content
+	breadcrumbScroll.SetPropagateNaturalWidth(false)                // Don't pass child width to parent
+	breadcrumbScroll.SetSizeRequest(0, -1)                          // Allow shrinking to 0 width
+	header.Append(breadcrumbScroll)
+
 	// Breadcrumb container
 	breadcrumbBox := gtk.NewBox(gtk.OrientationHorizontal, 4)
 	breadcrumbBox.SetMarginStart(8)
 	breadcrumbBox.SetVisible(false)
-	header.Append(breadcrumbBox)
+	breadcrumbScroll.SetChild(breadcrumbBox)
 
 	// Home icon path
 	homeIconPath := "assets/icons/ui/home.svg"
@@ -75,11 +86,6 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 			currentBackHandler()
 		}
 	})
-
-	// Spacer to push menu button to the right
-	spacer := gtk.NewBox(gtk.OrientationHorizontal, 0)
-	spacer.SetHExpand(true)
-	header.Append(spacer)
 
 	// Plus button for creating files/folders (only visible on files page)
 	plusIconPath := "assets/icons/ui/plus.svg"
@@ -187,8 +193,11 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	// navigateTo will be set by the files page
 	var navigateTo func(string)
 
-	// Update breadcrumb based on current path
-	updateBreadcrumb = func(path string) {
+	// Current breadcrumb path - stored for recalculation on resize
+	var currentBreadcrumbPath string
+
+	// Helper to build breadcrumb widgets based on available width
+	buildBreadcrumb := func(path string, availableWidth int) {
 		// Clear existing breadcrumb
 		for {
 			child := breadcrumbBox.FirstChild()
@@ -198,8 +207,8 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 			breadcrumbBox.Remove(child)
 		}
 
-		// Don't show breadcrumb at root
-		if path == "/" {
+		// Don't show breadcrumb at root or empty path
+		if path == "/" || path == "" {
 			breadcrumbBox.SetVisible(false)
 			appIcon.SetVisible(true)
 			return
@@ -225,20 +234,30 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		// Split path into parts
 		parts := strings.Split(strings.Trim(path, "/"), "/")
 
-		// Calculate how many parts we can show (rough estimate based on available space)
-		maxParts := 4 // Show at most 4 parts before truncating
+		// Estimate how many parts we can show based on available width
+		// Home button ~28px, separator ~10px, each char ~7px, button padding ~14px
+		homeWidth := 28
+		sepWidth := 10
+		charWidth := 7
+		btnPadding := 14
+		ellipsisWidth := 25 // "…" label width
 
-		if len(parts) <= maxParts {
-			// Show all parts
+		// Calculate total path length in estimated pixels
+		totalPathWidth := homeWidth
+		partWidths := make([]int, len(parts))
+		for i, part := range parts {
+			partWidths[i] = sepWidth + len(part)*charWidth + btnPadding
+			totalPathWidth += partWidths[i]
+		}
+
+		// If everything fits, show all
+		if availableWidth <= 0 || totalPathWidth <= availableWidth {
 			for i, part := range parts {
-				// Add separator
 				sep := gtk.NewLabel("/")
 				sep.AddCSSClass("breadcrumb-sep")
 				breadcrumbBox.Append(sep)
 
-				// Build path up to this part
 				partPath := "/" + strings.Join(parts[:i+1], "/")
-
 				btn := gtk.NewButton()
 				btn.SetLabel(part)
 				btn.AddCSSClass("flat")
@@ -251,56 +270,196 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 				})
 				breadcrumbBox.Append(btn)
 			}
-		} else {
-			// Truncate from middle: show first part, ..., last two parts
-			// First part
-			sep1 := gtk.NewLabel("/")
-			sep1.AddCSSClass("breadcrumb-sep")
-			breadcrumbBox.Append(sep1)
+			return
+		}
 
-			firstPath := "/" + parts[0]
-			firstBtn := gtk.NewButton()
-			firstBtn.SetLabel(parts[0])
-			firstBtn.AddCSSClass("flat")
-			firstBtn.AddCSSClass("breadcrumb-btn")
-			firstBtn.ConnectClicked(func() {
-				if navigateTo != nil {
-					navigateTo(firstPath)
-				}
-			})
-			breadcrumbBox.Append(firstBtn)
+		// Need to truncate - always show first and last, add ellipsis in middle
+		// Minimum fallback: home + ... + last (with ellipsized last)
+		if len(parts) <= 2 {
+			// For 1-2 parts, show: home + ... + ellipsized last
+			sep := gtk.NewLabel("/")
+			sep.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep)
 
-			// Ellipsis
+			ellipsis := gtk.NewLabel("…")
+			ellipsis.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(ellipsis)
+
 			sep2 := gtk.NewLabel("/")
 			sep2.AddCSSClass("breadcrumb-sep")
 			breadcrumbBox.Append(sep2)
 
-			ellipsis := gtk.NewLabel("...")
+			lastIdx := len(parts) - 1
+			lastPath := "/" + strings.Join(parts, "/")
+			lastBtn := gtk.NewButton()
+			lastLabel := gtk.NewLabel(parts[lastIdx])
+			lastLabel.SetEllipsize(pango.EllipsizeEnd)
+			lastLabel.SetMaxWidthChars(12)
+			lastBtn.SetChild(lastLabel)
+			lastBtn.AddCSSClass("flat")
+			lastBtn.AddCSSClass("breadcrumb-btn")
+			lastBtn.ConnectClicked(func() {
+				if navigateTo != nil {
+					navigateTo(lastPath)
+				}
+			})
+			breadcrumbBox.Append(lastBtn)
+			return
+		}
+
+		// Calculate minimum width needed: home + first + ellipsis + last
+		minWidth := homeWidth + partWidths[0] + sepWidth + ellipsisWidth + partWidths[len(parts)-1]
+
+		// If even minimum doesn't fit, use ultra-minimal: home + ... + ellipsized-last
+		if minWidth > availableWidth {
+			sep := gtk.NewLabel("/")
+			sep.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep)
+
+			ellipsis := gtk.NewLabel("…")
 			ellipsis.AddCSSClass("breadcrumb-sep")
 			breadcrumbBox.Append(ellipsis)
 
-			// Last two parts
-			for i := len(parts) - 2; i < len(parts); i++ {
-				sep := gtk.NewLabel("/")
-				sep.AddCSSClass("breadcrumb-sep")
-				breadcrumbBox.Append(sep)
+			sep2 := gtk.NewLabel("/")
+			sep2.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep2)
 
-				partPath := "/" + strings.Join(parts[:i+1], "/")
+			lastIdx := len(parts) - 1
+			lastPath := "/" + strings.Join(parts, "/")
+			lastBtn := gtk.NewButton()
+			lastLabel := gtk.NewLabel(parts[lastIdx])
+			lastLabel.SetEllipsize(pango.EllipsizeEnd)
+			lastLabel.SetMaxWidthChars(10)
+			lastBtn.SetChild(lastLabel)
+			lastBtn.AddCSSClass("flat")
+			lastBtn.AddCSSClass("breadcrumb-btn")
+			lastBtn.ConnectClicked(func() {
+				if navigateTo != nil {
+					navigateTo(lastPath)
+				}
+			})
+			breadcrumbBox.Append(lastBtn)
+			return
+		}
 
-				btn := gtk.NewButton()
-				btn.SetLabel(parts[i])
-				btn.AddCSSClass("flat")
-				btn.AddCSSClass("breadcrumb-btn")
-				capturedPath := partPath
-				btn.ConnectClicked(func() {
-					if navigateTo != nil {
-						navigateTo(capturedPath)
-					}
-				})
-				breadcrumbBox.Append(btn)
+		// Determine how many middle parts we can show
+		remainingWidth := availableWidth - minWidth
+		middleParts := []int{} // indices of middle parts to show
+
+		// Try to add parts from the end (closer to current location)
+		for i := len(parts) - 2; i > 0 && remainingWidth > 0; i-- {
+			if remainingWidth >= partWidths[i] {
+				middleParts = append([]int{i}, middleParts...)
+				remainingWidth -= partWidths[i]
+			} else {
+				break
 			}
 		}
+
+		// Build the breadcrumb: first part
+		sep1 := gtk.NewLabel("/")
+		sep1.AddCSSClass("breadcrumb-sep")
+		breadcrumbBox.Append(sep1)
+
+		firstPath := "/" + parts[0]
+		firstBtn := gtk.NewButton()
+		firstBtn.SetLabel(parts[0])
+		firstBtn.AddCSSClass("flat")
+		firstBtn.AddCSSClass("breadcrumb-btn")
+		firstBtn.ConnectClicked(func() {
+			if navigateTo != nil {
+				navigateTo(firstPath)
+			}
+		})
+		breadcrumbBox.Append(firstBtn)
+
+		// Ellipsis (only if we're skipping parts)
+		if len(middleParts) == 0 || middleParts[0] > 1 {
+			sep2 := gtk.NewLabel("/")
+			sep2.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep2)
+
+			ellipsis := gtk.NewLabel("…")
+			ellipsis.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(ellipsis)
+		}
+
+		// Middle parts (if any)
+		for _, i := range middleParts {
+			sep := gtk.NewLabel("/")
+			sep.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep)
+
+			partPath := "/" + strings.Join(parts[:i+1], "/")
+			btn := gtk.NewButton()
+			btn.SetLabel(parts[i])
+			btn.AddCSSClass("flat")
+			btn.AddCSSClass("breadcrumb-btn")
+			capturedPath := partPath
+			btn.ConnectClicked(func() {
+				if navigateTo != nil {
+					navigateTo(capturedPath)
+				}
+			})
+			breadcrumbBox.Append(btn)
+		}
+
+		// Last part - use ellipsized label
+		sep3 := gtk.NewLabel("/")
+		sep3.AddCSSClass("breadcrumb-sep")
+		breadcrumbBox.Append(sep3)
+
+		lastIdx := len(parts) - 1
+		lastPath := "/" + strings.Join(parts, "/")
+		lastBtn := gtk.NewButton()
+		// Use a label with ellipsization for the last button
+		lastLabel := gtk.NewLabel(parts[lastIdx])
+		lastLabel.SetEllipsize(pango.EllipsizeEnd)
+		lastLabel.SetMaxWidthChars(15) // Limit max width, will ellipsize if longer
+		lastBtn.SetChild(lastLabel)
+		lastBtn.AddCSSClass("flat")
+		lastBtn.AddCSSClass("breadcrumb-btn")
+		lastBtn.ConnectClicked(func() {
+			if navigateTo != nil {
+				navigateTo(lastPath)
+			}
+		})
+		breadcrumbBox.Append(lastBtn)
 	}
+
+	// Fixed header element widths (back button ~48px when visible, plus btn ~48px, menu btn ~48px, header padding ~24px)
+	const fixedHeaderWidth = 48 + 48 + 48 + 24 // plus, menu, back/logo, padding
+
+	// Helper to recalculate breadcrumb with current header size
+	recalcBreadcrumb := func() {
+		if currentBreadcrumbPath == "" || currentBreadcrumbPath == "/" {
+			// At root - hide breadcrumb and show logo
+			breadcrumbBox.SetVisible(false)
+			appIcon.SetVisible(true)
+			return
+		}
+		// Use header's AllocatedWidth - this is the actual rendered width
+		headerWidth := header.AllocatedWidth()
+		availableWidth := headerWidth - fixedHeaderWidth
+		log.Printf("Breadcrumb recalc: headerWidth=%d, availableWidth=%d, path=%s", headerWidth, availableWidth, currentBreadcrumbPath)
+		if availableWidth < 0 {
+			availableWidth = 0
+		}
+		buildBreadcrumb(currentBreadcrumbPath, availableWidth)
+	}
+
+	// Update breadcrumb based on current path
+	updateBreadcrumb = func(path string) {
+		currentBreadcrumbPath = path
+		// Defer calculation to next idle to ensure layout is complete
+		glib.IdleAdd(recalcBreadcrumb)
+	}
+
+	// Recalculate breadcrumb on header resize (when window resizes, header resizes too)
+	header.Connect("notify::allocated-width", func() {
+		log.Printf("header notify::allocated-width fired")
+		glib.IdleAdd(recalcBreadcrumb)
+	})
 
 	filesPage, setNavigateTo := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn, updateBreadcrumb)
 	navigateTo = setNavigateTo
