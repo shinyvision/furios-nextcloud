@@ -14,7 +14,27 @@
 }
 
 .header-back-btn:hover {
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.header-plus-btn {
+  color: #ffffff;
+  padding: 4px 8px;
+}
+
+.header-plus-btn:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Hamburger menu button in header */
+.header-bar button {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.header-bar button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
 }
 
 .header-logo {
@@ -172,11 +192,46 @@ spinner.material-spinner:checked {
 /* Modal Styles */
 .modal-dimmer {
   background-color: rgba(0, 0, 0, 0);
-  transition: background-color 100ms ease-out;
+  transition: background-color 200ms;
+}
+
+@keyframes dimmer-fade-in {
+  0% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
 }
 
 .modal-visible {
   background-color: rgba(0, 0, 0, 0.5);
+  animation: dimmer-fade-in 200ms cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+@keyframes modal-scale-in {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes modal-scale-out {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
 }
 
 .modal-content {
@@ -184,14 +239,14 @@ spinner.material-spinner:checked {
   border-radius: 12px;
   padding: 24px;
   min-width: 280px;
-  opacity: 0;
-  transform: scale(0.5);
-  transition: transform 100ms cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 100ms ease-out;
 }
 
-.modal-scale-in {
-  opacity: 1;
-  transform: scale(1);
+.modal-content.modal-animate-in {
+  animation: modal-scale-in 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+.modal-content.modal-animate-out {
+  animation: modal-scale-out 100ms ease-out forwards;
 }
 
 .modal-button {
@@ -234,12 +289,33 @@ spinner.material-spinner:checked {
 }
 
 .modal-btn-primary {
-  background-color: #e53935;
+  background-color: #0082c9;
   color: #ffffff;
 }
 
 .modal-btn-primary:active {
+  background-color: #006ea1;
+}
+
+.modal-btn-danger {
+  background-color: #e53935;
+  color: #ffffff;
+}
+
+.modal-btn-danger:active {
   background-color: #c62828;
+}
+
+.modal-entry {
+  background-color: #ffffff;
+  color: #333333;
+  border: 1px solid #dcdcdc;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.modal-entry:focus {
+  border-color: #0082c9;
 }
 
 /* Sync indicator bubble */

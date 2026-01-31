@@ -65,6 +65,20 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	spacer.SetHExpand(true)
 	header.Append(spacer)
 
+	// Plus button for creating files/folders (only visible on files page)
+	plusIconPath := "assets/icons/ui/plus.svg"
+	if _, err := os.Stat(plusIconPath); os.IsNotExist(err) {
+		plusIconPath = "/app/share/nextcloud-gtk/assets/icons/ui/plus.svg"
+	}
+	plusIcon := gtk.NewImageFromFile(plusIconPath)
+	plusIcon.SetPixelSize(24)
+	plusBtn := gtk.NewButton()
+	plusBtn.SetChild(plusIcon)
+	plusBtn.AddCSSClass("flat")
+	plusBtn.AddCSSClass("header-plus-btn")
+	plusBtn.SetVisible(false)
+	header.Append(plusBtn)
+
 	revealer := gtk.NewRevealer()
 	dimmer := gtk.NewBox(gtk.OrientationVertical, 0)
 
@@ -142,6 +156,8 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		stack.SetVisibleChildName(name)
 		// Hide header on first two pages
 		header.SetVisible(name != "server" && name != "login")
+		// Show plus button only on files page
+		plusBtn.SetVisible(name == "files")
 	}
 
 	serverPage := pages.NewServerPage(showPage)
@@ -150,7 +166,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	loginPage := pages.NewLoginPage(showPage)
 	stack.AddNamed(loginPage.Box, "login")
 
-	filesPage := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler)
+	filesPage := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn)
 	stack.AddNamed(filesPage, "files")
 
 	settingsPage := pages.NewSettingsPage(showPage, setBackHandler)

@@ -6,16 +6,10 @@ import (
 )
 
 type Modal struct {
-	overlay       *gtk.Overlay
 	parentOverlay *gtk.Overlay
-	dimmer        *gtk.Box
 	contentBox    *gtk.Box
-	scaleRevealer *gtk.Revealer // Not using Revealer for scale, but could use for opacity.
-	// For scale, we need custom CSS or Fixed container interactions.
-	// To keep it simple and robust with GTK4, we'll use CSS transitions on a class.
-
-	container *gtk.Box
-	isShown   bool
+	container     *gtk.Box
+	isShown       bool
 }
 
 // NewModal creates a new modal that can be attached to the given parent overlay.
@@ -25,33 +19,13 @@ func NewModal(parentOverlay *gtk.Overlay) *Modal {
 		parentOverlay: parentOverlay,
 	}
 
-	// 1. Container - touches edges, handles dimmer background
+	// Container - touches edges, handles dimmer background
 	m.container = gtk.NewBox(gtk.OrientationVertical, 0)
 	m.container.SetHAlign(gtk.AlignFill)
 	m.container.SetVAlign(gtk.AlignFill)
-	m.container.AddCSSClass("modal-dimmer") // Background color + opacity transition
+	m.container.AddCSSClass("modal-dimmer")
 
-	// Click on dimmer to close
-	clickGesture := gtk.NewGestureClick()
-	clickGesture.Connect("pressed", func(n int, x, y float64) {
-		// Check if click is inside contentBox
-		// Translate coordinates from container (dimmer) to contentBox
-		tx, ty, ok := m.container.TranslateCoordinates(m.contentBox, x, y)
-		if ok {
-			// Check if transformed coordinates are within contentBox bounds
-			if tx >= 0 && tx < float64(m.contentBox.Width()) &&
-				ty >= 0 && ty < float64(m.contentBox.Height()) {
-				// Click was inside content, do nothing (let button handle it or just ignore)
-				return
-			}
-		}
-
-		// Click was outside (on dimmer), close modal
-		m.Hide()
-	})
-	m.container.AddController(clickGesture)
-
-	// 2. Center alignment wrapper
+	// Center alignment wrapper
 	centerBox := gtk.NewBox(gtk.OrientationVertical, 0)
 	centerBox.SetHAlign(gtk.AlignCenter)
 	centerBox.SetVAlign(gtk.AlignCenter)
@@ -59,10 +33,9 @@ func NewModal(parentOverlay *gtk.Overlay) *Modal {
 	centerBox.SetVExpand(true)
 	m.container.Append(centerBox)
 
-	// 3. Content Box - actual modal content
+	// Content Box - actual modal content
 	m.contentBox = gtk.NewBox(gtk.OrientationVertical, 0)
 	m.contentBox.AddCSSClass("modal-content")
-
 	centerBox.Append(m.contentBox)
 
 	return m
@@ -70,7 +43,6 @@ func NewModal(parentOverlay *gtk.Overlay) *Modal {
 
 // SetContent sets the widget to be displayed inside the modal
 func (m *Modal) SetContent(widget gtk.Widgetter) {
-	// Remove existing children if any
 	child := m.contentBox.FirstChild()
 	for child != nil {
 		m.contentBox.Remove(child)
@@ -85,13 +57,16 @@ func (m *Modal) Show() {
 	}
 	m.isShown = true
 
+	// Reset animation classes
+	m.contentBox.AddCSSClass("modal-animate-in")
+	m.contentBox.RemoveCSSClass("modal-animate-out")
+
+	// Add to overlay
 	m.parentOverlay.AddOverlay(m.container)
 
-	// Trigger CSS transitions
-	// We need a small delay to allow the widget to be mapped/rendered for transition to work
+	// Trigger animations - use IdleAdd to ensure widget is in the tree first
 	glib.IdleAdd(func() {
 		m.container.AddCSSClass("modal-visible")
-		m.contentBox.AddCSSClass("modal-scale-in")
 	})
 }
 
@@ -101,11 +76,13 @@ func (m *Modal) Hide() {
 	}
 	m.isShown = false
 
+	// Trigger close animations
 	m.container.RemoveCSSClass("modal-visible")
-	m.contentBox.RemoveCSSClass("modal-scale-in")
+	m.contentBox.RemoveCSSClass("modal-animate-in")
+	m.contentBox.AddCSSClass("modal-animate-out")
 
 	// Wait for animation to finish before removing
-	glib.TimeoutAdd(150, func() bool {
+	glib.TimeoutAdd(200, func() bool {
 		m.parentOverlay.RemoveOverlay(m.container)
 		return false
 	})
