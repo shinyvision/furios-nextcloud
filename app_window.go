@@ -430,18 +430,14 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	// Fixed header element widths (back button ~48px when visible, plus btn ~48px, menu btn ~48px, header padding ~24px)
 	const fixedHeaderWidth = 48 + 48 + 48 + 24 // plus, menu, back/logo, padding
 
-	// Helper to recalculate breadcrumb with current header size
 	recalcBreadcrumb := func() {
 		if currentBreadcrumbPath == "" || currentBreadcrumbPath == "/" {
-			// At root - hide breadcrumb and show logo
 			breadcrumbBox.SetVisible(false)
 			appIcon.SetVisible(true)
 			return
 		}
-		// Use header's AllocatedWidth - this is the actual rendered width
-		headerWidth := header.AllocatedWidth()
+		headerWidth := header.Width()
 		availableWidth := headerWidth - fixedHeaderWidth
-		log.Printf("Breadcrumb recalc: headerWidth=%d, availableWidth=%d, path=%s", headerWidth, availableWidth, currentBreadcrumbPath)
 		if availableWidth < 0 {
 			availableWidth = 0
 		}
@@ -451,14 +447,30 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	// Update breadcrumb based on current path
 	updateBreadcrumb = func(path string) {
 		currentBreadcrumbPath = path
-		// Defer calculation to next idle to ensure layout is complete
 		glib.IdleAdd(recalcBreadcrumb)
 	}
 
-	// Recalculate breadcrumb on header resize (when window resizes, header resizes too)
-	header.Connect("notify::allocated-width", func() {
-		log.Printf("header notify::allocated-width fired")
-		glib.IdleAdd(recalcBreadcrumb)
+	var lastHeaderWidth int
+
+	// Check for resize whenever the window becomes active or gets focus
+	checkForResize := func() {
+		currentWidth := header.Width()
+		if currentWidth != lastHeaderWidth && currentWidth > 0 {
+			lastHeaderWidth = currentWidth
+			glib.IdleAdd(recalcBreadcrumb)
+		}
+	}
+
+	// Connect to window state changes that indicate resize may have occurred
+	window.Connect("map", func() {
+		log.Printf("Window mapped")
+		glib.IdleAdd(checkForResize)
+	})
+
+	// Poll for resize periodically (every 100ms) to catch window resize events
+	glib.TimeoutAdd(100, func() bool {
+		checkForResize()
+		return true // Keep polling
 	})
 
 	filesPage, setNavigateTo := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn, updateBreadcrumb)
