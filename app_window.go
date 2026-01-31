@@ -51,19 +51,18 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	appIcon.SetPixelSize(32)
 	header.Append(appIcon)
 
-	// Breadcrumb clipping container - ScrolledWindow prevents breadcrumb from affecting window min-width
-	breadcrumbScroll := gtk.NewScrolledWindow()
-	breadcrumbScroll.SetHExpand(true)
-	breadcrumbScroll.SetPolicy(gtk.PolicyExternal, gtk.PolicyNever) // Hide scrollbars, clip content
-	breadcrumbScroll.SetPropagateNaturalWidth(false)                // Don't pass child width to parent
-	breadcrumbScroll.SetSizeRequest(0, -1)                          // Allow shrinking to 0 width
-	header.Append(breadcrumbScroll)
+	// Breadcrumb wrapper - SetSizeRequest(0, -1) prevents breadcrumb from affecting window min-width
+	// while SetHExpand(true) allows it to expand to fill available space
+	breadcrumbWrapper := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	breadcrumbWrapper.SetHExpand(true)
+	breadcrumbWrapper.SetSizeRequest(0, -1) // Zero minimum width, natural height
+	header.Append(breadcrumbWrapper)
 
 	// Breadcrumb container
 	breadcrumbBox := gtk.NewBox(gtk.OrientationHorizontal, 4)
 	breadcrumbBox.SetMarginStart(8)
 	breadcrumbBox.SetVisible(false)
-	breadcrumbScroll.SetChild(breadcrumbBox)
+	breadcrumbWrapper.Append(breadcrumbBox)
 
 	// Home icon path
 	homeIconPath := "assets/icons/ui/home.svg"
