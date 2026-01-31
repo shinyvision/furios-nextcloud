@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Nextcloud GTK
+Comment=File sync client for Nextcloud
+Exec=nextcloud-gtk
+Icon=io.github.shinyvision.NextcloudGtk
+Terminal=false
+Categories=Utility;Network;FileTransfer;
+StartupWMClass=io.github.shinyvision.NextcloudGtk
+DBusActivatable=false

@@ -1,2 +1,7 @@
 vendor/
 nextcloud-gtk
+nextcloud-gtk-bin
+build-dir
+.flatpak-builder
+deploy.sh
+.claude

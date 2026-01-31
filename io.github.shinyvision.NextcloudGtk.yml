@@ -1,0 +1,35 @@
+app-id: io.github.shinyvision.NextcloudGtk
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.golang
+
+command: /app/bin/nextcloud-gtk
+
+finish-args:
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --share=network
+  - --device=dri
+
+modules:
+  - name: nextcloud-gtk
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      append-path: /usr/lib/sdk/golang/bin
+      build-args:
+        - --share=network
+      env:
+        GOROOT: /usr/lib/sdk/golang
+        CFLAGS: ""
+        CXXFLAGS: ""
+        LDFLAGS: ""
+        GOFLAGS: ""
+    build-commands:
+      - make install
+      
+    sources:
+      - type: dir
+        path: .

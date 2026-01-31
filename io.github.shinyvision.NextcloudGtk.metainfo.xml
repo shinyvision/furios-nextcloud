@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.shinyvision.NextcloudGtk</id>
+
+  <name>Nextcloud GTK</name>
+  <summary>Lightweight file sync client for Nextcloud</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Nextcloud GTK is a lightweight GTK4-based desktop file synchronization
+      client for Nextcloud servers. It provides bidirectional sync between
+      local directories and remote Nextcloud instances via WebDAV.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.shinyvision.NextcloudGtk.desktop</launchable>
+
+  <url type="homepage">https://github.com/shinyvision/nextcloud-gtk</url>
+  <url type="bugtracker">https://github.com/shinyvision/nextcloud-gtk/issues</url>
+  
+  <content_rating type="oars-1.1" />
+  
+  <releases>
+    <release version="1.0.0" date="2026-01-31" />
+  </releases>
+</component>
