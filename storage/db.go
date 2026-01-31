@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/adrg/xdg"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -12,8 +13,8 @@ var db *sql.DB
 
 func InitDB(dbPath string) error {
 	if dbPath == "" {
-		home, _ := os.UserHomeDir()
-		dbPath = filepath.Join(home, ".config", "nextcloud-gtk", "settings.db")
+		// Use XDG Config Home (handles Flatpak ~/.var/app/.../config automatically)
+		dbPath = filepath.Join(xdg.ConfigHome, "nextcloud-gtk", "settings.db")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
