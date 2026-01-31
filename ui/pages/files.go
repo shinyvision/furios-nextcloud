@@ -417,6 +417,152 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			icon := gtk.NewImageFromIconName("text-x-generic")
 			icon.SetPixelSize(48)
 			fileItem.Append(icon)
+
+			// Build full path for this file
+			var fileFullPath string
+			if path == "/" {
+				fileFullPath = "/" + name
+			} else {
+				fileFullPath = path + "/" + name
+			}
+
+			fileName := name
+			fileItem.AddCSSClass("clickable-folder") // Reuse folder styling for pressed state
+			pressed := false
+
+			// Drag gesture for press visual feedback
+			dragGesture := gtk.NewGestureDrag()
+			dragGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
+			dragGesture.Connect("drag-begin", func(startX, startY float64) {
+				pressed = true
+				fileItem.AddCSSClass("folder-pressed")
+			})
+			dragGesture.Connect("drag-update", func(offsetX, offsetY float64) {
+				if !pressed {
+					return
+				}
+				dist := math.Hypot(offsetX, offsetY)
+				if dist > 45 {
+					pressed = false
+					fileItem.RemoveCSSClass("folder-pressed")
+				}
+			})
+			dragGesture.Connect("drag-end", func(offsetX, offsetY float64) {
+				fileItem.RemoveCSSClass("folder-pressed")
+				pressed = false
+			})
+			fileItem.AddController(dragGesture)
+
+			// Long press for file context menu
+			longPress := gtk.NewGestureLongPress()
+			longPress.SetTouchOnly(false)
+			longPress.Connect("pressed", func(x, y float64) {
+				pressed = false
+				fileItem.RemoveCSSClass("folder-pressed")
+
+				modal := components.NewModal(parentOverlay)
+
+				var showFileMenu func()
+				var showDeleteConfirmation func()
+
+				showDeleteConfirmation = func() {
+					confirmContent := gtk.NewBox(gtk.OrientationVertical, 10)
+
+					confirmTitle := gtk.NewLabel("Are you sure?")
+					confirmTitle.AddCSSClass("modal-title")
+					confirmContent.Append(confirmTitle)
+
+					confirmMsg := gtk.NewLabel("This file will be permanently deleted.")
+					confirmMsg.AddCSSClass("modal-message")
+					confirmMsg.SetMarginBottom(10)
+					confirmContent.Append(confirmMsg)
+
+					buttonBox := gtk.NewBox(gtk.OrientationHorizontal, 10)
+					buttonBox.SetHomogeneous(true)
+
+					cancelBtn := gtk.NewButton()
+					cancelBtn.SetChild(gtk.NewLabel("Cancel"))
+					cancelBtn.AddCSSClass("modal-button")
+					cancelBtn.AddCSSClass("modal-btn-secondary")
+					cancelBtn.ConnectClicked(func() {
+						showFileMenu()
+					})
+
+					deleteBtn := gtk.NewButton()
+					deleteBtn.SetChild(gtk.NewLabel("Delete"))
+					deleteBtn.AddCSSClass("modal-button")
+					deleteBtn.AddCSSClass("modal-btn-danger")
+					deleteBtn.ConnectClicked(func() {
+						modal.Hide()
+						go func() {
+							url, _ := storage.GetSetting("server_url")
+							user, _ := storage.GetSetting("username")
+							pass, _ := storage.GetSetting("password")
+							client := nextcloud.NewClient(url, user, pass)
+							err := client.DeleteFile(fileFullPath)
+							if err != nil {
+								log.Printf("Failed to delete file: %v", err)
+								return
+							}
+							log.Printf("Deleted file: %s", fileFullPath)
+							glib.IdleAdd(func() {
+								// Remove from grid
+								grid.Remove(fileItem.Parent())
+								// Remove from gridItems
+								for i, item := range gridItems {
+									if item.name == fileName && !item.isDir {
+										gridItems = append(gridItems[:i], gridItems[i+1:]...)
+										break
+									}
+								}
+							})
+						}()
+					})
+
+					buttonBox.Append(cancelBtn)
+					buttonBox.Append(deleteBtn)
+					confirmContent.Append(buttonBox)
+
+					modal.SetContent(confirmContent)
+				}
+
+				showFileMenu = func() {
+					content := gtk.NewBox(gtk.OrientationVertical, 5)
+
+					title := gtk.NewLabel(fileName)
+					title.AddCSSClass("modal-title")
+					title.SetMarginBottom(10)
+					content.Append(title)
+
+					// Delete file button
+					deleteBtn := gtk.NewButton()
+					deleteBtn.SetChild(gtk.NewLabel("Delete file"))
+					deleteBtn.AddCSSClass("modal-button")
+					deleteBtn.AddCSSClass("modal-btn-secondary")
+					deleteBtn.SetHAlign(gtk.AlignFill)
+					deleteBtn.ConnectClicked(func() {
+						showDeleteConfirmation()
+					})
+					content.Append(deleteBtn)
+
+					// Cancel button
+					cancelBtn := gtk.NewButton()
+					cancelBtn.SetChild(gtk.NewLabel("Cancel"))
+					cancelBtn.AddCSSClass("modal-button")
+					cancelBtn.AddCSSClass("modal-btn-secondary")
+					cancelBtn.SetHAlign(gtk.AlignFill)
+					cancelBtn.ConnectClicked(func() {
+						modal.Hide()
+					})
+					content.Append(cancelBtn)
+
+					modal.SetContent(content)
+				}
+
+				showFileMenu()
+				modal.Show()
+			})
+			fileItem.AddController(longPress)
 		}
 
 		nameLabel := gtk.NewLabel(truncateFileName(name, 20))
