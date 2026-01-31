@@ -824,7 +824,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		}()
 	}
 
-	refreshFiles("/")
+	// refreshFiles("/")
 
 	// Plus button click handler for create modal
 	plusBtn.ConnectClicked(func() {

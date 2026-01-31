@@ -172,6 +172,9 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		stack.SetVisibleChildName("settings")
 	})
 
+	// navigateTo will be set by the files page
+	var navigateTo func(string)
+
 	// Pages
 	showPage := func(name string) {
 		stack.SetVisibleChildName(name)
@@ -181,6 +184,11 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		plusBtn.SetVisible(name == "files")
 		// Show breadcrumb only on files page
 		breadcrumbBox.SetVisible(name == "files")
+
+		// Trigger file load when entering files page
+		if name == "files" && navigateTo != nil {
+			navigateTo("/")
+		}
 	}
 
 	serverPage := pages.NewServerPage(showPage)
@@ -188,9 +196,6 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 
 	loginPage := pages.NewLoginPage(showPage)
 	stack.AddNamed(loginPage.Box, "login")
-
-	// navigateTo will be set by the files page
-	var navigateTo func(string)
 
 	// Current breadcrumb path - stored for recalculation on resize
 	var currentBreadcrumbPath string

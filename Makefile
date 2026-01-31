@@ -1,9 +1,17 @@
-.PHONY: all install
+.PHONY: all build run clean install
 
 APP_NAME=nextcloud-gtk
 BIN_NAME=nextcloud-gtk-bin
 APP_ID=io.github.shinyvision.NextcloudGtk
 
+build:
+	go build -mod=readonly -o $(APP_NAME) main.go app_window.go
+
+run: build
+	./$(APP_NAME) --debug
+
+clean:
+	rm -f $(APP_NAME) $(BIN_NAME) build
 
 install:
 	@if [ ! -f nextcloud-gtk-bin ]; then \

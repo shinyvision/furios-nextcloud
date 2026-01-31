@@ -82,6 +82,7 @@ type SyncManager struct {
 	// Track files currently being synced to avoid self-triggered loops
 	syncingFiles map[string]bool
 	syncingMux   sync.RWMutex
+	syncJobMux   sync.Mutex
 }
 
 // NewSyncManager creates a new sync manager
@@ -1284,7 +1285,14 @@ func (sm *SyncManager) remotePollingLoop() {
 			return
 		case <-ticker.C:
 			log.Println("Running periodic remote sync check")
-			sm.SyncAllFolders()
+			go func() {
+				if sm.syncJobMux.TryLock() {
+					defer sm.syncJobMux.Unlock()
+					sm.SyncAllFolders()
+				} else {
+					log.Println("Skipping sync - previous sync still running")
+				}
+			}()
 		}
 	}
 }
