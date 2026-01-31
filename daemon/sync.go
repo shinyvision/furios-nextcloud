@@ -1337,6 +1337,29 @@ func (sm *SyncManager) TriggerSyncForFolder(folderID int64) {
 	}()
 }
 
+// StopWatchingFolder stops watching a specific folder by its ID
+func (sm *SyncManager) StopWatchingFolder(folderID int64) {
+	sm.watchersMux.Lock()
+	defer sm.watchersMux.Unlock()
+
+	if watcher, exists := sm.watchers[folderID]; exists {
+		watcher.Close()
+		delete(sm.watchers, folderID)
+		log.Printf("Stopped watching folder ID: %d", folderID)
+	}
+}
+
+// StopWatchingFolderByRemotePath stops watching a folder by its remote path
+func (sm *SyncManager) StopWatchingFolderByRemotePath(remotePath string) {
+	// Get the folder ID from the database first
+	folder, err := storage.GetSyncFolderByRemotePath(remotePath)
+	if err != nil || folder == nil {
+		log.Printf("Could not find folder for remote path: %s", remotePath)
+		return
+	}
+	sm.StopWatchingFolder(folder.ID)
+}
+
 // IsRunning returns whether the sync manager is running
 func (sm *SyncManager) IsRunning() bool {
 	sm.mux.RLock()

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"nextcloud-gtk/internal/ipc"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
 	"nextcloud-gtk/ui/components"
@@ -60,6 +61,9 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		isDir bool
 	}
 	var gridItems []GridItem
+
+	// Track if we're inside a synced folder (subfolders shouldn't show sync option)
+	var isInsideSyncedFolder bool
 
 	// Grid for files
 	grid = gtk.NewFlowBox()
@@ -277,6 +281,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 					confirmMsg := gtk.NewLabel("Deleting this folder will also delete everything inside.")
 					confirmMsg.AddCSSClass("modal-message")
+					confirmMsg.SetWrap(true)
 					confirmMsg.SetMarginBottom(10)
 					confirmContent.Append(confirmMsg)
 
@@ -367,37 +372,107 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 								}
 							}
 						})
-					} else {
+					} else if !isInsideSyncedFolder {
+						// Only show sync option if we're not inside a synced folder
 						createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
-							dialog := gtk.NewFileChooserNative(
-								"Select Local Directory",
-								nil,
-								gtk.FileChooserActionSelectFolder,
-								"_Select",
-								"_Cancel",
-							)
+							// Check if there are synced subfolders
+							allSyncedFolders, _ := storage.GetSyncFolders()
+							type subfolderInfo struct {
+								remotePath string
+								id         int64
+							}
+							var syncedSubfolders []subfolderInfo
+							for _, sf := range allSyncedFolders {
+								if strings.HasPrefix(sf.RemotePath, folderFullPath+"/") {
+									syncedSubfolders = append(syncedSubfolders, subfolderInfo{
+										remotePath: sf.RemotePath,
+										id:         sf.ID,
+									})
+								}
+							}
 
-							dialog.ConnectResponse(func(responseId int) {
-								if responseId == int(gtk.ResponseAccept) {
-									file := dialog.File()
-									if file != nil {
-										localPath := file.Path()
-										err := storage.AddSyncFolder(folderFullPath, localPath)
-										if err != nil {
-											log.Printf("Failed to save sync folder mapping: %v", err)
-										} else {
-											log.Printf("Saved sync mapping: %s -> %s", folderFullPath, localPath)
-											if folderItem != nil {
-												updateSyncIndicator(folderItem, true)
+							// Function to open file chooser and perform sync
+							openFileChooser := func() {
+								dialog := gtk.NewFileChooserNative(
+									"Select Local Directory",
+									nil,
+									gtk.FileChooserActionSelectFolder,
+									"_Select",
+									"_Cancel",
+								)
+
+								dialog.ConnectResponse(func(responseId int) {
+									if responseId == int(gtk.ResponseAccept) {
+										file := dialog.File()
+										if file != nil {
+											localPath := file.Path()
+											// Remove synced subfolders first
+											for _, sub := range syncedSubfolders {
+												// Stop the watcher before removing from database
+												ipc.SendSignal(fmt.Sprintf("stop_watch_id:%d", sub.id))
+												storage.RemoveSyncFolder(sub.remotePath)
+												log.Printf("Removed subfolder sync: %s (id=%d)", sub.remotePath, sub.id)
+											}
+											// Add the new sync
+											err := storage.AddSyncFolder(folderFullPath, localPath)
+											if err != nil {
+												log.Printf("Failed to save sync folder mapping: %v", err)
+											} else {
+												log.Printf("Saved sync mapping: %s -> %s", folderFullPath, localPath)
+												if folderItem != nil {
+													updateSyncIndicator(folderItem, true)
+												}
 											}
 										}
 									}
-								}
-								dialog.Destroy()
-								modal.Hide()
-							})
+									dialog.Destroy()
+									modal.Hide()
+								})
 
-							dialog.Show()
+								dialog.Show()
+							}
+
+							// If there are synced subfolders, show warning first
+							if len(syncedSubfolders) > 0 {
+								warningContent := gtk.NewBox(gtk.OrientationVertical, 10)
+
+								warningTitle := gtk.NewLabel("Warning")
+								warningTitle.AddCSSClass("modal-title")
+								warningContent.Append(warningTitle)
+
+								warningMsg := gtk.NewLabel("This folder contains subfolders that are already synced.\nSyncing this folder will cause the subfolders to be detached.")
+								warningMsg.AddCSSClass("modal-message")
+								warningMsg.SetWrap(true)
+								warningMsg.SetMarginBottom(10)
+								warningContent.Append(warningMsg)
+
+								buttonBox := gtk.NewBox(gtk.OrientationHorizontal, 10)
+								buttonBox.SetHomogeneous(true)
+
+								cancelBtn := gtk.NewButton()
+								cancelBtn.SetChild(gtk.NewLabel("Cancel"))
+								cancelBtn.AddCSSClass("modal-button")
+								cancelBtn.AddCSSClass("modal-btn-secondary")
+								cancelBtn.ConnectClicked(func() {
+									showFolderContent()
+								})
+
+								proceedBtn := gtk.NewButton()
+								proceedBtn.SetChild(gtk.NewLabel("Proceed"))
+								proceedBtn.AddCSSClass("modal-button")
+								proceedBtn.AddCSSClass("modal-btn-primary")
+								proceedBtn.ConnectClicked(func() {
+									openFileChooser()
+								})
+
+								buttonBox.Append(cancelBtn)
+								buttonBox.Append(proceedBtn)
+								warningContent.Append(buttonBox)
+
+								modal.SetContent(warningContent)
+							} else {
+								openFileChooser()
+							}
 						})
 					}
 
@@ -476,6 +551,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 					confirmMsg := gtk.NewLabel("This file will be permanently deleted.")
 					confirmMsg.AddCSSClass("modal-message")
+					confirmMsg.SetWrap(true)
 					confirmMsg.SetMarginBottom(10)
 					confirmContent.Append(confirmMsg)
 
@@ -690,6 +766,8 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		}
 		// Build a set of synced folder paths for quick lookup
 		syncedSet := make(map[string]bool)
+		// Check if current path is inside a synced folder
+		isInsideSyncedFolder = false
 		for _, sf := range syncedFolders {
 			parent := filepath.Dir(sf.RemotePath)
 			if parent == "." {
@@ -701,6 +779,11 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 				key = "/" + name
 			}
 			syncedSet[key] = true
+
+			// Check if currentPath starts with this synced folder path
+			if strings.HasPrefix(path+"/", sf.RemotePath+"/") {
+				isInsideSyncedFolder = true
+			}
 		}
 
 		spinner.SetVisible(true)

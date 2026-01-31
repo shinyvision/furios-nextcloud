@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"log"
 	"nextcloud-gtk/internal/ipc"
 	"nextcloud-gtk/internal/nextcloud"
@@ -75,6 +76,15 @@ func handleIPCMessage(msg string) {
 			folderID := msg[13:]
 			log.Printf("Sync triggered for folder: %s", folderID)
 			// Parse folder ID and trigger sync
+		} else if len(msg) > 14 && msg[:14] == "stop_watch_id:" {
+			// Stop watching a specific folder by ID
+			var folderID int64
+			if _, err := fmt.Sscanf(msg[14:], "%d", &folderID); err == nil {
+				if syncManager != nil {
+					log.Printf("Stopping watcher for folder ID: %d", folderID)
+					syncManager.StopWatchingFolder(folderID)
+				}
+			}
 		}
 	}
 }
