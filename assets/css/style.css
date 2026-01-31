@@ -341,3 +341,20 @@ spinner.material-spinner:checked {
   margin-top: 6px;
   margin-right: 20px;
 }
+
+/* Breadcrumb navigation */
+.breadcrumb-btn {
+  color: #ffffff;
+  padding: 2px 6px;
+  min-height: 0;
+  font-size: 14px;
+}
+
+.breadcrumb-btn:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.breadcrumb-sep {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+}

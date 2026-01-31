@@ -4,6 +4,7 @@ import (
 	"nextcloud-gtk/storage"
 	"nextcloud-gtk/ui/pages"
 	"os"
+	"strings"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
@@ -46,6 +47,21 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	appIcon := gtk.NewImageFromFile(logoPath)
 	appIcon.SetPixelSize(32)
 	header.Append(appIcon)
+
+	// Breadcrumb container
+	breadcrumbBox := gtk.NewBox(gtk.OrientationHorizontal, 4)
+	breadcrumbBox.SetMarginStart(8)
+	breadcrumbBox.SetVisible(false)
+	header.Append(breadcrumbBox)
+
+	// Home icon path
+	homeIconPath := "assets/icons/ui/home.svg"
+	if _, err := os.Stat(homeIconPath); os.IsNotExist(err) {
+		homeIconPath = "/app/share/nextcloud-gtk/assets/icons/ui/home.svg"
+	}
+
+	// Function to update breadcrumb - will be set after navigateTo is defined
+	var updateBreadcrumb func(path string)
 
 	// Back button handler system
 	var currentBackHandler func()
@@ -158,6 +174,8 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		header.SetVisible(name != "server" && name != "login")
 		// Show plus button only on files page
 		plusBtn.SetVisible(name == "files")
+		// Show breadcrumb only on files page
+		breadcrumbBox.SetVisible(name == "files")
 	}
 
 	serverPage := pages.NewServerPage(showPage)
@@ -166,7 +184,126 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	loginPage := pages.NewLoginPage(showPage)
 	stack.AddNamed(loginPage.Box, "login")
 
-	filesPage := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn)
+	// navigateTo will be set by the files page
+	var navigateTo func(string)
+
+	// Update breadcrumb based on current path
+	updateBreadcrumb = func(path string) {
+		// Clear existing breadcrumb
+		for {
+			child := breadcrumbBox.FirstChild()
+			if child == nil {
+				break
+			}
+			breadcrumbBox.Remove(child)
+		}
+
+		// Don't show breadcrumb at root
+		if path == "/" {
+			breadcrumbBox.SetVisible(false)
+			appIcon.SetVisible(true)
+			return
+		}
+
+		breadcrumbBox.SetVisible(true)
+		appIcon.SetVisible(false)
+
+		// Add home button
+		homeBtn := gtk.NewButton()
+		homeIcon := gtk.NewImageFromFile(homeIconPath)
+		homeIcon.SetPixelSize(18)
+		homeBtn.SetChild(homeIcon)
+		homeBtn.AddCSSClass("flat")
+		homeBtn.AddCSSClass("breadcrumb-btn")
+		homeBtn.ConnectClicked(func() {
+			if navigateTo != nil {
+				navigateTo("/")
+			}
+		})
+		breadcrumbBox.Append(homeBtn)
+
+		// Split path into parts
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+
+		// Calculate how many parts we can show (rough estimate based on available space)
+		maxParts := 4 // Show at most 4 parts before truncating
+
+		if len(parts) <= maxParts {
+			// Show all parts
+			for i, part := range parts {
+				// Add separator
+				sep := gtk.NewLabel("/")
+				sep.AddCSSClass("breadcrumb-sep")
+				breadcrumbBox.Append(sep)
+
+				// Build path up to this part
+				partPath := "/" + strings.Join(parts[:i+1], "/")
+
+				btn := gtk.NewButton()
+				btn.SetLabel(part)
+				btn.AddCSSClass("flat")
+				btn.AddCSSClass("breadcrumb-btn")
+				capturedPath := partPath
+				btn.ConnectClicked(func() {
+					if navigateTo != nil {
+						navigateTo(capturedPath)
+					}
+				})
+				breadcrumbBox.Append(btn)
+			}
+		} else {
+			// Truncate from middle: show first part, ..., last two parts
+			// First part
+			sep1 := gtk.NewLabel("/")
+			sep1.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep1)
+
+			firstPath := "/" + parts[0]
+			firstBtn := gtk.NewButton()
+			firstBtn.SetLabel(parts[0])
+			firstBtn.AddCSSClass("flat")
+			firstBtn.AddCSSClass("breadcrumb-btn")
+			firstBtn.ConnectClicked(func() {
+				if navigateTo != nil {
+					navigateTo(firstPath)
+				}
+			})
+			breadcrumbBox.Append(firstBtn)
+
+			// Ellipsis
+			sep2 := gtk.NewLabel("/")
+			sep2.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(sep2)
+
+			ellipsis := gtk.NewLabel("...")
+			ellipsis.AddCSSClass("breadcrumb-sep")
+			breadcrumbBox.Append(ellipsis)
+
+			// Last two parts
+			for i := len(parts) - 2; i < len(parts); i++ {
+				sep := gtk.NewLabel("/")
+				sep.AddCSSClass("breadcrumb-sep")
+				breadcrumbBox.Append(sep)
+
+				partPath := "/" + strings.Join(parts[:i+1], "/")
+
+				btn := gtk.NewButton()
+				btn.SetLabel(parts[i])
+				btn.AddCSSClass("flat")
+				btn.AddCSSClass("breadcrumb-btn")
+				capturedPath := partPath
+				btn.ConnectClicked(func() {
+					if navigateTo != nil {
+						navigateTo(capturedPath)
+					}
+				})
+				breadcrumbBox.Append(btn)
+			}
+		}
+	}
+
+	filesPage, setNavigateTo := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn, updateBreadcrumb)
+	navigateTo = setNavigateTo
 	stack.AddNamed(filesPage, "files")
 
 	settingsPage := pages.NewSettingsPage(showPage, setBackHandler)

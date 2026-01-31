@@ -36,7 +36,7 @@ func truncateFileName(name string, maxLen int) string {
 	return truncated + "…"
 }
 
-func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), setBackHandler func(func(), bool), plusBtn *gtk.Button) *gtk.Box {
+func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), setBackHandler func(func(), bool), plusBtn *gtk.Button, updateBreadcrumb func(string)) (*gtk.Box, func(string)) {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.AddCSSClass("files-container")
 
@@ -729,6 +729,10 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 	refreshFiles = func(path string) {
 		currentPath = path
+		// Update breadcrumb
+		if updateBreadcrumb != nil {
+			updateBreadcrumb(currentPath)
+		}
 		// Clear folder items map
 		for k := range folderItems {
 			delete(folderItems, k)
@@ -1012,5 +1016,5 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		modal.Show()
 	})
 
-	return box
+	return box, refreshFiles
 }
