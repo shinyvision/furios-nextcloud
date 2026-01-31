@@ -1,6 +1,7 @@
 package pages
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"nextcloud-gtk/internal/nextcloud"
@@ -473,6 +474,34 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		}
 	}
 
+	// Check if a name (file or folder) already exists in the current directory
+	nameExists := func(name string) bool {
+		lowerName := strings.ToLower(name)
+		for _, item := range gridItems {
+			if strings.ToLower(item.name) == lowerName {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Generate a unique filename by appending (2), (3), etc. before the extension
+	generateUniqueFileName := func(name string) string {
+		if !nameExists(name) {
+			return name
+		}
+
+		ext := filepath.Ext(name)
+		baseName := strings.TrimSuffix(name, ext)
+
+		for i := 2; ; i++ {
+			newName := fmt.Sprintf("%s (%d)%s", baseName, i, ext)
+			if !nameExists(newName) {
+				return newName
+			}
+		}
+	}
+
 	refreshFiles = func(path string) {
 		currentPath = path
 		// Clear folder items map
@@ -601,7 +630,10 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 						file := dialog.File()
 						if file != nil {
 							localPath := file.Path()
-							fileName := filepath.Base(localPath)
+							originalFileName := filepath.Base(localPath)
+
+							// Generate unique filename if name already exists
+							fileName := generateUniqueFileName(originalFileName)
 
 							go func() {
 								// Read file content
@@ -667,6 +699,18 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			entry.AddCSSClass("modal-entry")
 			content.Append(entry)
 
+			// Error label (hidden initially)
+			errorLabel := gtk.NewLabel("That name already exists")
+			errorLabel.AddCSSClass("modal-error-text")
+			errorLabel.SetVisible(false)
+			content.Append(errorLabel)
+
+			// Clear error when user types
+			entry.ConnectChanged(func() {
+				entry.RemoveCSSClass("entry-error")
+				errorLabel.SetVisible(false)
+			})
+
 			buttonBox := gtk.NewBox(gtk.OrientationHorizontal, 10)
 			buttonBox.SetHomogeneous(true)
 			buttonBox.SetMarginTop(10)
@@ -686,6 +730,13 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			addBtn.ConnectClicked(func() {
 				folderName := entry.Text()
 				if folderName == "" {
+					return
+				}
+
+				// Check if name already exists
+				if nameExists(folderName) {
+					entry.AddCSSClass("entry-error")
+					errorLabel.SetVisible(true)
 					return
 				}
 

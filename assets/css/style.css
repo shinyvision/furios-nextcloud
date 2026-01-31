@@ -318,6 +318,20 @@ spinner.material-spinner:checked {
   border-color: #0082c9;
 }
 
+.modal-entry.entry-error {
+  border-color: #e53935;
+}
+
+.modal-entry.entry-error:focus {
+  border-color: #e53935;
+}
+
+.modal-error-text {
+  color: #e53935;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
 /* Sync indicator bubble */
 .sync-bubble {
   background-color: #f1b30d;
