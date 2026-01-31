@@ -219,6 +219,11 @@ spinner.material-spinner:checked {
   opacity: 0.8;
 }
 
+.modal-message {
+  font-size: 14px;
+  color: #666;
+}
+
 .modal-btn-secondary {
   background-color: #f0f0f0;
   color: #444444;
@@ -226,6 +231,15 @@ spinner.material-spinner:checked {
 
 .modal-btn-secondary:active {
   background-color: #e0e0e0;
+}
+
+.modal-btn-primary {
+  background-color: #e53935;
+  color: #ffffff;
+}
+
+.modal-btn-primary:active {
+  background-color: #c62828;
 }
 
 /* Sync indicator bubble */

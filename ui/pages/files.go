@@ -307,14 +307,6 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 							pressed = false
 							fileItem.RemoveCSSClass("folder-pressed")
 
-							modal := components.NewModal(parentOverlay)
-							content := gtk.NewBox(gtk.OrientationVertical, 5)
-
-							title := gtk.NewLabel(folderName)
-							title.AddCSSClass("modal-title")
-							title.SetMarginBottom(10)
-							content.Append(title)
-
 							// Calculate full remote path for this folder
 							var folderFullPath string
 							if path == "/" {
@@ -323,83 +315,157 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 								folderFullPath = path + "/" + folderName
 							}
 
-							// Look up folder item
-							folderItem := folderItems[folderFullPath]
-							isSynced := folderItem != nil && folderItem.isSynced
+							// Create a single modal - reuse it for all content
+							modal := components.NewModal(parentOverlay)
 
-							createBtn := func(label string, cssClass string, closeOnAction bool, action func()) {
-								btn := gtk.NewButton()
-								lbl := gtk.NewLabel(label)
-								btn.SetChild(lbl)
-								btn.AddCSSClass("modal-button")
-								btn.AddCSSClass(cssClass)
-								btn.SetHAlign(gtk.AlignFill)
-								btn.ConnectClicked(func() {
-									if closeOnAction {
-										modal.Hide()
-									}
-									if action != nil {
-										action()
-									}
+							// Forward declare for mutual recursion
+							var showFolderContent func()
+							var showDeleteConfirmation func()
+
+							// Build delete confirmation content
+							showDeleteConfirmation = func() {
+								confirmContent := gtk.NewBox(gtk.OrientationVertical, 10)
+
+								confirmTitle := gtk.NewLabel("Are you sure?")
+								confirmTitle.AddCSSClass("modal-title")
+								confirmContent.Append(confirmTitle)
+
+								confirmMsg := gtk.NewLabel("Deleting this folder will also delete everything inside.")
+								confirmMsg.AddCSSClass("modal-message")
+								confirmMsg.SetMarginBottom(10)
+								confirmContent.Append(confirmMsg)
+
+								buttonBox := gtk.NewBox(gtk.OrientationHorizontal, 10)
+								buttonBox.SetHomogeneous(true)
+
+								cancelBtn := gtk.NewButton()
+								cancelBtn.SetChild(gtk.NewLabel("Cancel"))
+								cancelBtn.AddCSSClass("modal-button")
+								cancelBtn.AddCSSClass("modal-btn-secondary")
+								cancelBtn.ConnectClicked(func() {
+									showFolderContent()
 								})
-								content.Append(btn)
+
+								deleteBtn := gtk.NewButton()
+								deleteBtn.SetChild(gtk.NewLabel("Delete"))
+								deleteBtn.AddCSSClass("modal-button")
+								deleteBtn.AddCSSClass("modal-btn-primary")
+								deleteBtn.ConnectClicked(func() {
+									modal.Hide()
+									go func() {
+										url, _ := storage.GetSetting("server_url")
+										user, _ := storage.GetSetting("username")
+										pass, _ := storage.GetSetting("password")
+										client := nextcloud.NewClient(url, user, pass)
+										err := client.DeleteFile(folderFullPath)
+										if err != nil {
+											log.Printf("Failed to delete folder: %v", err)
+											return
+										}
+										log.Printf("Deleted folder: %s", folderFullPath)
+										glib.IdleAdd(func() {
+											if fi := folderItems[folderFullPath]; fi != nil {
+												grid.Remove(fi.widget.Parent())
+												delete(folderItems, folderFullPath)
+											}
+										})
+									}()
+								})
+
+								buttonBox.Append(cancelBtn)
+								buttonBox.Append(deleteBtn)
+								confirmContent.Append(buttonBox)
+
+								modal.SetContent(confirmContent)
 							}
 
-							if isSynced {
-								createBtn("Stop sync", "modal-btn-secondary", true, func() {
-									err := storage.RemoveSyncFolder(folderFullPath)
-									if err != nil {
-										log.Printf("Failed to remove sync folder mapping: %v", err)
-									} else {
-										log.Printf("Removed sync mapping for: %s", folderFullPath)
-										// Update the folder item in-place
-										if folderItem != nil {
-											updateSyncIndicator(folderItem, false)
-										}
-									}
-								})
-							} else {
-								createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
-									dialog := gtk.NewFileChooserNative(
-										"Select Local Directory",
-										nil,
-										gtk.FileChooserActionSelectFolder,
-										"_Select",
-										"_Cancel",
-									)
+							// Build folder options content
+							showFolderContent = func() {
+								content := gtk.NewBox(gtk.OrientationVertical, 5)
 
-									dialog.ConnectResponse(func(responseId int) {
-										if responseId == int(gtk.ResponseAccept) {
-											file := dialog.File()
-											if file != nil {
-												localPath := file.Path()
-												err := storage.AddSyncFolder(folderFullPath, localPath)
-												if err != nil {
-													log.Printf("Failed to save sync folder mapping: %v", err)
-												} else {
-													log.Printf("Saved sync mapping: %s -> %s", folderFullPath, localPath)
-													// Update the folder item in-place
-													if folderItem != nil {
-														updateSyncIndicator(folderItem, true)
+								title := gtk.NewLabel(folderName)
+								title.AddCSSClass("modal-title")
+								title.SetMarginBottom(10)
+								content.Append(title)
+
+								folderItem := folderItems[folderFullPath]
+								isSynced := folderItem != nil && folderItem.isSynced
+
+								createBtn := func(label string, cssClass string, closeOnAction bool, action func()) {
+									btn := gtk.NewButton()
+									lbl := gtk.NewLabel(label)
+									btn.SetChild(lbl)
+									btn.AddCSSClass("modal-button")
+									btn.AddCSSClass(cssClass)
+									btn.SetHAlign(gtk.AlignFill)
+									btn.ConnectClicked(func() {
+										if closeOnAction {
+											modal.Hide()
+										}
+										if action != nil {
+											action()
+										}
+									})
+									content.Append(btn)
+								}
+
+								if isSynced {
+									createBtn("Stop sync", "modal-btn-secondary", true, func() {
+										err := storage.RemoveSyncFolder(folderFullPath)
+										if err != nil {
+											log.Printf("Failed to remove sync folder mapping: %v", err)
+										} else {
+											log.Printf("Removed sync mapping for: %s", folderFullPath)
+											if folderItem != nil {
+												updateSyncIndicator(folderItem, false)
+											}
+										}
+									})
+								} else {
+									createBtn("Sync to filesystem", "modal-btn-secondary", false, func() {
+										dialog := gtk.NewFileChooserNative(
+											"Select Local Directory",
+											nil,
+											gtk.FileChooserActionSelectFolder,
+											"_Select",
+											"_Cancel",
+										)
+
+										dialog.ConnectResponse(func(responseId int) {
+											if responseId == int(gtk.ResponseAccept) {
+												file := dialog.File()
+												if file != nil {
+													localPath := file.Path()
+													err := storage.AddSyncFolder(folderFullPath, localPath)
+													if err != nil {
+														log.Printf("Failed to save sync folder mapping: %v", err)
+													} else {
+														log.Printf("Saved sync mapping: %s -> %s", folderFullPath, localPath)
+														if folderItem != nil {
+															updateSyncIndicator(folderItem, true)
+														}
 													}
 												}
 											}
-										}
-										dialog.Destroy()
-										modal.Hide()
-									})
+											dialog.Destroy()
+											modal.Hide()
+										})
 
-									dialog.Show()
+										dialog.Show()
+									})
+								}
+
+								createBtn("Delete folder", "modal-btn-secondary", false, func() {
+									showDeleteConfirmation()
 								})
+
+								createBtn("Cancel", "modal-btn-secondary", true, nil)
+
+								modal.SetContent(content)
 							}
 
-							createBtn("Delete folder", "modal-btn-secondary", false, func() {
-								log.Println("Delete requested for:", folderName)
-							})
-
-							createBtn("Cancel", "modal-btn-secondary", true, nil)
-
-							modal.SetContent(content)
+							// Start with folder options
+							showFolderContent()
 							modal.Show()
 						})
 						fileItem.AddController(longPress)
