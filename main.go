@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -23,7 +24,10 @@ func main() {
 		}
 	}
 
-	if debugMode {
+	// Disable logging unless debug mode is enabled
+	if !debugMode {
+		log.SetOutput(io.Discard)
+	} else {
 		log.Println("Debug mode enabled")
 	}
 
