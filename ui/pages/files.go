@@ -8,12 +8,30 @@ import (
 	"nextcloud-gtk/ui/components"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
+
+// truncateFileName truncates a filename to maxLen characters, adding an ellipsis
+// and the file extension. Example: "my_very_long_file_name.png" -> "my_very_long_file_na…png"
+func truncateFileName(name string, maxLen int) string {
+	runes := []rune(name)
+	if len(runes) <= maxLen {
+		return name
+	}
+
+	ext := filepath.Ext(name)
+	truncated := string(runes[:maxLen])
+
+	if len(ext) > 1 {
+		return truncated + "…" + ext[1:] // ext[1:] removes the leading dot
+	}
+	return truncated + "…"
+}
 
 func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), setBackHandler func(func(), bool)) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
@@ -189,6 +207,14 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			glib.IdleAdd(func() {
 				spinner.SetVisible(false)
 
+				// Sort: folders first, then files, alphabetically within each group
+				sort.Slice(files, func(i, j int) bool {
+					if files[i].Type != files[j].Type {
+						return files[i].Type == "dir" // dirs come first
+					}
+					return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+				})
+
 				for _, f := range files {
 					fileItem := gtk.NewBox(gtk.OrientationVertical, 5)
 					fileItem.SetSizeRequest(80, 100)
@@ -246,9 +272,8 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 						fileItem.Append(icon)
 					}
 
-					nameLabel := gtk.NewLabel(f.Name)
+					nameLabel := gtk.NewLabel(truncateFileName(f.Name, 20))
 					nameLabel.AddCSSClass("file-label")
-					nameLabel.SetEllipsize(3)
 					nameLabel.SetSizeRequest(80, -1)
 					fileItem.Append(nameLabel)
 
