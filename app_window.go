@@ -1,16 +1,24 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"log"
+	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
 	"nextcloud-gtk/ui/pages"
 	"os"
+	"path/filepath"
 	"strings"
+
+	_ "image/jpeg"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
+	"golang.org/x/image/draw"
 )
 
 func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
@@ -170,16 +178,39 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	revealer.SetHAlign(gtk.AlignEnd)
 	overlay.AddOverlay(revealer)
 
-	// Menu Content
-	titleBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
-	titleBox.SetMarginStart(20)
-	titleBox.SetMarginTop(20)
-	titleBox.SetMarginBottom(10)
+	// Menu Content - User Profile Header
+	profileBox := gtk.NewBox(gtk.OrientationHorizontal, 12)
+	profileBox.AddCSSClass("menu-profile")
+	profileBox.SetMarginStart(20)
+	profileBox.SetMarginEnd(20)
+	profileBox.SetMarginTop(20)
+	profileBox.SetMarginBottom(16)
 
-	menuLabel := gtk.NewLabel("Menu")
-	menuLabel.AddCSSClass("welcome-label")
-	titleBox.Append(menuLabel)
-	menuBox.Append(titleBox)
+	// Avatar placeholder (will be updated when we have credentials)
+	avatarFrame := gtk.NewBox(gtk.OrientationVertical, 0)
+	avatarFrame.AddCSSClass("menu-avatar")
+	avatarFrame.SetSizeRequest(48, 48)
+
+	avatarImage := gtk.NewImage()
+	avatarImage.SetPixelSize(48)
+	avatarFrame.Append(avatarImage)
+	profileBox.Append(avatarFrame)
+
+	// Display name
+	displayNameLabel := gtk.NewLabel("")
+	displayNameLabel.AddCSSClass("menu-display-name")
+	displayNameLabel.SetHAlign(gtk.AlignStart)
+	displayNameLabel.SetEllipsize(3) // PANGO_ELLIPSIZE_END = 3
+	displayNameLabel.SetMaxWidthChars(15)
+	displayNameLabel.SetHExpand(true)
+	profileBox.Append(displayNameLabel)
+
+	menuBox.Append(profileBox)
+
+	// Separator after profile
+	separator := gtk.NewSeparator(gtk.OrientationHorizontal)
+	separator.AddCSSClass("menu-separator")
+	menuBox.Append(separator)
 
 	addMenuBtn := func(label string, iconFile string, action func()) {
 		btn := gtk.NewButton()
@@ -542,7 +573,85 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	storage.Ping()
 	user, err1 := storage.GetSetting("username")
 	pass, err2 := storage.GetSetting("password")
+	serverURL, _ := storage.GetSetting("server_url")
+
+	// Load user profile into menu
+	loadUserProfile := func() {
+		if user == "" || pass == "" || serverURL == "" {
+			displayNameLabel.SetText("Not logged in")
+			return
+		}
+
+		client := nextcloud.NewClient(serverURL, user, pass)
+
+		// Load display name
+		go func() {
+			displayName, err := client.GetDisplayName()
+			if err != nil {
+				displayName = user
+			}
+			glib.IdleAdd(func() {
+				displayNameLabel.SetText(displayName)
+			})
+		}()
+
+		// Load avatar
+		go func() {
+			avatarData, err := client.GetAvatar(96)
+			if err != nil {
+				log.Printf("Failed to load avatar: %v", err)
+				return
+			}
+
+			// Decode the image
+			img, _, err := image.Decode(bytes.NewReader(avatarData))
+			if err != nil {
+				log.Printf("Failed to decode avatar: %v", err)
+				return
+			}
+
+			// Scale to 48x48
+			size := 48
+			scaled := image.NewRGBA(image.Rect(0, 0, size, size))
+			draw.CatmullRom.Scale(scaled, scaled.Bounds(), img, img.Bounds(), draw.Over, nil)
+
+			// Create circular version
+			circular := image.NewRGBA(image.Rect(0, 0, size, size))
+			centerX, centerY := float64(size)/2, float64(size)/2
+			radius := float64(size) / 2
+
+			for y := 0; y < size; y++ {
+				for x := 0; x < size; x++ {
+					dx := float64(x) - centerX + 0.5
+					dy := float64(y) - centerY + 0.5
+					if dx*dx+dy*dy <= radius*radius {
+						circular.Set(x, y, scaled.At(x, y))
+					}
+				}
+			}
+
+			// Save circular avatar to temp file
+			tmpFile := filepath.Join(os.TempDir(), "nextcloud-gtk-avatar.png")
+			f, err := os.Create(tmpFile)
+			if err != nil {
+				log.Printf("Failed to create avatar file: %v", err)
+				return
+			}
+			if err := png.Encode(f, circular); err != nil {
+				f.Close()
+				log.Printf("Failed to encode avatar: %v", err)
+				return
+			}
+			f.Close()
+
+			glib.IdleAdd(func() {
+				avatarImage.SetFromFile(tmpFile)
+			})
+		}()
+	}
+
 	if err1 == nil && err2 == nil && user != "" && pass != "" {
+		loadUserProfile()
 		showPage("files")
 	} else {
 		showPage("server")

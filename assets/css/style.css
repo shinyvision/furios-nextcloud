@@ -87,6 +87,32 @@
   background-color: #f0f0f0;
 }
 
+/* Menu Profile Header */
+.menu-profile {
+  padding: 0;
+}
+
+.menu-avatar {
+  border-radius: 24px;
+  background-color: #e5e7eb;
+}
+
+.menu-avatar image {
+  border-radius: 24px;
+}
+
+.menu-display-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.menu-separator {
+  margin: 0 20px 8px 20px;
+  background-color: #e5e7eb;
+  min-height: 1px;
+}
+
 .sidebar-menu label {
   font-weight: 500;
   font-size: 16px;
@@ -414,7 +440,6 @@ scrolledwindow overshoot.right {
 }
 
 .settings-row-clickable {
-  cursor: pointer;
   transition: background-color 150ms;
 }
 

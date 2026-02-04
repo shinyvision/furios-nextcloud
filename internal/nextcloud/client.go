@@ -365,3 +365,66 @@ func (c *Client) MoveFile(oldRemotePath, newRemotePath string) error {
 
 	return nil
 }
+
+// GetAvatar fetches the user's avatar image (returns PNG/JPEG bytes)
+func (c *Client) GetAvatar(size int) ([]byte, error) {
+	endpoint := fmt.Sprintf("%s/index.php/avatar/%s/%d", c.BaseURL, url.PathEscape(c.Username), size)
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("avatar fetch failed with status: %s", resp.Status)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// GetDisplayName fetches the user's display name from OCS API
+func (c *Client) GetDisplayName() (string, error) {
+	endpoint := c.BaseURL + "/ocs/v2.php/cloud/user"
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+	req.Header.Set("OCS-APIRequest", "true")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.Username, nil // Fallback to username
+	}
+
+	var result struct {
+		Ocs struct {
+			Data struct {
+				DisplayName string `json:"displayname"`
+			} `json:"data"`
+		} `json:"ocs"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return c.Username, nil
+	}
+
+	if result.Ocs.Data.DisplayName != "" {
+		return result.Ocs.Data.DisplayName, nil
+	}
+	return c.Username, nil
+}
