@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"nextcloud-gtk/internal/ipc"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
@@ -133,6 +134,68 @@ func (sm *SyncManager) withRetry(op func() error) error {
 	return lastErr
 }
 
+// isOnWiFi checks if the device is connected via WiFi (not mobile data)
+// This is a heuristic: if we find a wireless interface that's up and has an IP, we're on WiFi
+func isOnWiFi() bool {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("Failed to get network interfaces: %v", err)
+		return true // Assume WiFi if we can't check
+	}
+
+	for _, iface := range interfaces {
+		// Skip loopback and down interfaces
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		// Check for common WiFi interface names
+		name := strings.ToLower(iface.Name)
+		isWireless := strings.HasPrefix(name, "wl") || // wlan0, wlp3s0, etc.
+			strings.HasPrefix(name, "wifi") ||
+			strings.HasPrefix(name, "wlan") ||
+			strings.Contains(name, "wireless")
+
+		// Check for mobile data interface names
+		isMobile := strings.HasPrefix(name, "wwan") ||
+			strings.HasPrefix(name, "rmnet") ||
+			strings.HasPrefix(name, "usb") ||
+			strings.HasPrefix(name, "ppp")
+
+		if isMobile {
+			// Mobile data interface is up
+			addrs, _ := iface.Addrs()
+			if len(addrs) > 0 {
+				log.Printf("Mobile data interface detected: %s", iface.Name)
+				return false
+			}
+		}
+
+		if isWireless {
+			addrs, _ := iface.Addrs()
+			if len(addrs) > 0 {
+				return true // WiFi interface with IP address
+			}
+		}
+	}
+
+	// No mobile data detected, assume we're on WiFi or ethernet
+	return true
+}
+
+// shouldSync checks if sync should proceed based on settings
+func shouldSync() bool {
+	// Check WiFi-only setting
+	wifiOnly, _ := storage.GetSetting("sync_wifi_only")
+	if wifiOnly == "" || wifiOnly == "true" {
+		if !isOnWiFi() {
+			log.Println("Skipping sync - not on WiFi and WiFi-only mode is enabled")
+			return false
+		}
+	}
+	return true
+}
+
 // Start begins the sync process
 func (sm *SyncManager) Start() {
 	sm.mux.Lock()
@@ -252,6 +315,11 @@ func computeHashForContent(content []byte) string {
 
 // SyncAllFolders performs sync for all configured folders
 func (sm *SyncManager) SyncAllFolders() {
+	// Check if we should sync (WiFi-only check)
+	if !shouldSync() {
+		return
+	}
+
 	folders, err := storage.GetSyncFolders()
 	if err != nil {
 		log.Printf("Failed to get sync folders: %v", err)
@@ -1285,7 +1353,15 @@ func (sm *SyncManager) handleLocalRename(folder storage.SyncFolder, oldPath, new
 
 // remotePollingLoop polls remote for changes periodically
 func (sm *SyncManager) remotePollingLoop() {
-	ticker := time.NewTicker(60 * time.Second)
+	// Get sync interval from settings (default 60 seconds)
+	interval := 60 * time.Second
+	if savedInterval, _ := storage.GetSetting("sync_interval"); savedInterval != "" {
+		if seconds, err := time.ParseDuration(savedInterval + "s"); err == nil {
+			interval = seconds
+		}
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -1293,6 +1369,19 @@ func (sm *SyncManager) remotePollingLoop() {
 		case <-sm.stopChan:
 			return
 		case <-ticker.C:
+			// Re-read interval in case it changed
+			newInterval := 60 * time.Second
+			if savedInterval, _ := storage.GetSetting("sync_interval"); savedInterval != "" {
+				if seconds, err := time.ParseDuration(savedInterval + "s"); err == nil {
+					newInterval = seconds
+				}
+			}
+			if newInterval != interval {
+				interval = newInterval
+				ticker.Reset(interval)
+				log.Printf("Sync interval changed to %v", interval)
+			}
+
 			log.Println("Running periodic remote sync check")
 			go func() {
 				if sm.syncJobMux.TryLock() {

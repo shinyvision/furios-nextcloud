@@ -30,89 +30,204 @@ func NewSettingsPage(showPage func(string)) *SettingsPage {
 	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
-	box.AddCSSClass("files-container") // Re-use light background class
+	box.AddCSSClass("files-container")
 	page.Box = box
 
-	content := gtk.NewBox(gtk.OrientationVertical, 20)
-	content.SetMarginTop(20)
+	// Scrollable content
+	scrolled := gtk.NewScrolledWindow()
+	scrolled.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	scrolled.SetVExpand(true)
+	box.Append(scrolled)
+
+	content := gtk.NewBox(gtk.OrientationVertical, 24)
+	content.SetMarginTop(24)
+	content.SetMarginBottom(24)
 	content.SetMarginStart(20)
 	content.SetMarginEnd(20)
-	box.Append(content)
+	scrolled.SetChild(content)
 
-	label := gtk.NewLabel("Sync Settings")
-	label.AddCSSClass("welcome-label")
-	label.SetHAlign(gtk.AlignStart)
-	content.Append(label)
+	// === SYNC SECTION ===
+	syncSectionLabel := gtk.NewLabel("Sync")
+	syncSectionLabel.AddCSSClass("settings-section-title")
+	syncSectionLabel.SetHAlign(gtk.AlignStart)
+	content.Append(syncSectionLabel)
 
-	// List of synced folders
-	listLabel := gtk.NewLabel("Synced Folders")
-	listLabel.AddCSSClass("file-label")
-	listLabel.SetHAlign(gtk.AlignStart)
-	content.Append(listLabel)
+	syncSection := gtk.NewBox(gtk.OrientationVertical, 0)
+	syncSection.AddCSSClass("settings-section")
+	content.Append(syncSection)
 
-	listBox := gtk.NewListBox()
-	listBox.AddCSSClass("search-entry") // Use same rounded border style
-	listBox.SetSelectionMode(gtk.SelectionNone)
-	content.Append(listBox)
+	// --- Sync Interval Row ---
+	syncIntervalRow := gtk.NewBox(gtk.OrientationHorizontal, 12)
+	syncIntervalRow.AddCSSClass("settings-row")
 
-	refreshList := func() {
-		// Clear existing rows
-		for {
-			row := listBox.RowAtIndex(0)
-			if row == nil {
-				break
-			}
-			listBox.Remove(row)
-		}
+	syncIntervalTextBox := gtk.NewBox(gtk.OrientationVertical, 0)
+	syncIntervalTextBox.SetHExpand(true)
 
-		folders, _ := storage.GetSyncFolders()
-		for _, f := range folders {
-			row := gtk.NewBox(gtk.OrientationHorizontal, 10)
-			row.SetMarginTop(10)
-			row.SetMarginBottom(10)
-			row.SetMarginStart(10)
-			
-			folderLabel := gtk.NewLabel(f.RemotePath + " → " + f.LocalPath)
-			folderLabel.AddCSSClass("file-label")
-			row.Append(folderLabel)
-			
-			listBox.Append(row)
+	syncIntervalTitle := gtk.NewLabel("Sync interval")
+	syncIntervalTitle.AddCSSClass("settings-row-title")
+	syncIntervalTitle.SetHAlign(gtk.AlignStart)
+	syncIntervalTextBox.Append(syncIntervalTitle)
+
+	syncIntervalSubtitle := gtk.NewLabel("How often to check for changes")
+	syncIntervalSubtitle.AddCSSClass("settings-row-subtitle")
+	syncIntervalSubtitle.SetHAlign(gtk.AlignStart)
+	syncIntervalTextBox.Append(syncIntervalSubtitle)
+
+	syncIntervalRow.Append(syncIntervalTextBox)
+
+	// Dropdown for sync interval
+	intervalOptions := []string{"30 seconds", "1 minute", "15 minutes", "30 minutes", "1 hour"}
+	intervalValues := []string{"30", "60", "900", "1800", "3600"}
+
+	intervalDropdown := gtk.NewDropDownFromStrings(intervalOptions)
+	intervalDropdown.AddCSSClass("settings-dropdown")
+	intervalDropdown.SetVAlign(gtk.AlignCenter)
+
+	// Load saved value
+	savedInterval, _ := storage.GetSetting("sync_interval")
+	selectedIndex := uint(1) // Default to 1 minute
+	for i, val := range intervalValues {
+		if val == savedInterval {
+			selectedIndex = uint(i)
+			break
 		}
 	}
+	intervalDropdown.SetSelected(selectedIndex)
 
-	refreshList()
-
-	// Form to add a new sync folder
-	addBox := gtk.NewBox(gtk.OrientationVertical, 10)
-	addBox.SetMarginTop(20)
-	content.Append(addBox)
-
-	remoteEntry := gtk.NewEntry()
-	remoteEntry.SetPlaceholderText("Remote Path (e.g. /Documents)")
-	remoteEntry.AddCSSClass("search-entry")
-	addBox.Append(remoteEntry)
-
-	localEntry := gtk.NewEntry()
-	localEntry.SetPlaceholderText("Local Path (e.g. /home/rachel/Documents)")
-	localEntry.AddCSSClass("search-entry")
-	addBox.Append(localEntry)
-
-	addBtn := gtk.NewButtonWithLabel("Add Sync Folder")
-	addBtn.AddCSSClass("suggested-action")
-	addBtn.ConnectClicked(func() {
-		remote := remoteEntry.Text()
-		local := localEntry.Text()
-		if remote != "" && local != "" {
-			if err := storage.AddSyncFolder(remote, local); err != nil {
-				log.Printf("Failed to add sync folder: %v", err)
+	// Save on change
+	intervalDropdown.Connect("notify::selected", func() {
+		selected := intervalDropdown.Selected()
+		if selected < uint(len(intervalValues)) {
+			if err := storage.SaveSetting("sync_interval", intervalValues[selected]); err != nil {
+				log.Printf("Failed to save sync interval: %v", err)
 			} else {
-				remoteEntry.SetText("")
-				localEntry.SetText("")
-				refreshList()
+				log.Printf("Sync interval set to %s seconds", intervalValues[selected])
 			}
 		}
 	})
-	addBox.Append(addBtn)
+
+	syncIntervalRow.Append(intervalDropdown)
+	syncSection.Append(syncIntervalRow)
+
+	// --- WiFi Only Row ---
+	wifiOnlyRow := gtk.NewBox(gtk.OrientationHorizontal, 12)
+	wifiOnlyRow.AddCSSClass("settings-row")
+	wifiOnlyRow.AddCSSClass("settings-row-clickable")
+
+	wifiOnlyTextBox := gtk.NewBox(gtk.OrientationVertical, 0)
+	wifiOnlyTextBox.SetHExpand(true)
+
+	wifiOnlyTitle := gtk.NewLabel("Sync only on WiFi")
+	wifiOnlyTitle.AddCSSClass("settings-row-title")
+	wifiOnlyTitle.SetHAlign(gtk.AlignStart)
+	wifiOnlyTextBox.Append(wifiOnlyTitle)
+
+	wifiOnlySubtitle := gtk.NewLabel("Pause sync when using mobile data")
+	wifiOnlySubtitle.AddCSSClass("settings-row-subtitle")
+	wifiOnlySubtitle.SetHAlign(gtk.AlignStart)
+	wifiOnlyTextBox.Append(wifiOnlySubtitle)
+
+	wifiOnlyRow.Append(wifiOnlyTextBox)
+
+	wifiOnlySwitch := gtk.NewSwitch()
+	wifiOnlySwitch.AddCSSClass("settings-switch")
+	wifiOnlySwitch.SetVAlign(gtk.AlignCenter)
+
+	// Load saved value (default to true)
+	savedWifiOnly, _ := storage.GetSetting("sync_wifi_only")
+	if savedWifiOnly == "" || savedWifiOnly == "true" {
+		wifiOnlySwitch.SetActive(true)
+	} else {
+		wifiOnlySwitch.SetActive(false)
+	}
+
+	wifiOnlySwitch.ConnectStateSet(func(state bool) bool {
+		val := "false"
+		if state {
+			val = "true"
+		}
+		if err := storage.SaveSetting("sync_wifi_only", val); err != nil {
+			log.Printf("Failed to save wifi only setting: %v", err)
+		} else {
+			log.Printf("Sync WiFi only set to %s", val)
+		}
+		return false // Let GTK handle the state change
+	})
+
+	wifiOnlyRow.Append(wifiOnlySwitch)
+
+	// Make entire row clickable - use Activate for proper animation
+	wifiOnlyGesture := gtk.NewGestureClick()
+	wifiOnlyGesture.ConnectReleased(func(nPress int, x, y float64) {
+		wifiOnlySwitch.Activate()
+	})
+	wifiOnlyRow.AddController(wifiOnlyGesture)
+
+	syncSection.Append(wifiOnlyRow)
+
+	// === NOTIFICATIONS SECTION ===
+	notifSectionLabel := gtk.NewLabel("Notifications")
+	notifSectionLabel.AddCSSClass("settings-section-title")
+	notifSectionLabel.SetHAlign(gtk.AlignStart)
+	notifSectionLabel.SetMarginTop(8)
+	content.Append(notifSectionLabel)
+
+	notifSection := gtk.NewBox(gtk.OrientationVertical, 0)
+	notifSection.AddCSSClass("settings-section")
+	content.Append(notifSection)
+
+	// --- Notify on Sync Row ---
+	notifyRow := gtk.NewBox(gtk.OrientationHorizontal, 12)
+	notifyRow.AddCSSClass("settings-row")
+	notifyRow.AddCSSClass("settings-row-clickable")
+
+	notifyTextBox := gtk.NewBox(gtk.OrientationVertical, 0)
+	notifyTextBox.SetHExpand(true)
+
+	notifyTitle := gtk.NewLabel("Notify when files sync")
+	notifyTitle.AddCSSClass("settings-row-title")
+	notifyTitle.SetHAlign(gtk.AlignStart)
+	notifyTextBox.Append(notifyTitle)
+
+	notifySubtitle := gtk.NewLabel("Show a notification when changes are synced")
+	notifySubtitle.AddCSSClass("settings-row-subtitle")
+	notifySubtitle.SetHAlign(gtk.AlignStart)
+	notifyTextBox.Append(notifySubtitle)
+
+	notifyRow.Append(notifyTextBox)
+
+	notifySwitch := gtk.NewSwitch()
+	notifySwitch.AddCSSClass("settings-switch")
+	notifySwitch.SetVAlign(gtk.AlignCenter)
+
+	// Load saved value (default to false)
+	savedNotify, _ := storage.GetSetting("sync_notify")
+	notifySwitch.SetActive(savedNotify == "true")
+
+	notifySwitch.ConnectStateSet(func(state bool) bool {
+		val := "false"
+		if state {
+			val = "true"
+		}
+		if err := storage.SaveSetting("sync_notify", val); err != nil {
+			log.Printf("Failed to save notify setting: %v", err)
+		} else {
+			log.Printf("Sync notifications set to %s", val)
+		}
+		return false
+	})
+
+	notifyRow.Append(notifySwitch)
+
+	// Make entire row clickable - use Activate for proper animation
+	notifyGesture := gtk.NewGestureClick()
+	notifyGesture.ConnectReleased(func(nPress int, x, y float64) {
+		notifySwitch.Activate()
+	})
+	notifyRow.AddController(notifyGesture)
+
+	notifyRow.Append(notifySwitch)
+	notifSection.Append(notifyRow)
 
 	return page
 }
