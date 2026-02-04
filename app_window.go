@@ -512,5 +512,12 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	})
 	dimmer.AddController(clickGesture)
 
+	// Prevent destruction on close - just hide
+	window.ConnectCloseRequest(func() bool {
+		log.Println("Window close requested - Hiding window")
+		window.SetVisible(false)
+		return true
+	})
+
 	return window
 }

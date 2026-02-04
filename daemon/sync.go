@@ -3,8 +3,10 @@ package daemon
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
+	"nextcloud-gtk/internal/ipc"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
 	"os"
@@ -375,6 +377,13 @@ func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
 
 	remoteFiles, remoteDirs, err := sm.gatherRemoteState(folder.RemotePath)
 	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			log.Printf("Remote folder %s deleted (404), removing sync config", folder.RemotePath)
+			sm.StopWatchingFolder(folder.ID)
+			storage.RemoveSyncFolder(folder.RemotePath)
+			ipc.SendSignal(fmt.Sprintf("sync_removed:%s", folder.RemotePath))
+			return
+		}
 		log.Printf("Failed to gather remote state for %s: %v", folder.RemotePath, err)
 		return
 	}

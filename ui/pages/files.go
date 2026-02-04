@@ -303,6 +303,17 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 					deleteBtn.ConnectClicked(func() {
 						modal.Hide()
 						go func() {
+							// Check if this folder is currently synced
+							if syncFolder, err := storage.GetSyncFolderByRemotePath(folderFullPath); err == nil && syncFolder != nil {
+								log.Printf("Deleting synced folder, removing sync config: %s", folderFullPath)
+								// Stop the watcher via IPC
+								ipc.SendSignal(fmt.Sprintf("stop_watch_id:%d", syncFolder.ID))
+								// Remove from database
+								if err := storage.RemoveSyncFolder(folderFullPath); err != nil {
+									log.Printf("Failed to remove sync folder: %v", err)
+								}
+							}
+
 							url, _ := storage.GetSetting("server_url")
 							user, _ := storage.GetSetting("username")
 							pass, _ := storage.GetSetting("password")
