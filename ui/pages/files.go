@@ -3,7 +3,6 @@ package pages
 import (
 	"fmt"
 	"log"
-	"math"
 	"nextcloud-gtk/internal/ipc"
 	"nextcloud-gtk/internal/nextcloud"
 	"nextcloud-gtk/storage"
@@ -249,42 +248,32 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 				folderPath: folderFullPath,
 			}
 
-			// Make folder clickable with touch-friendly interaction
 			fileItem.AddCSSClass("clickable-folder")
 			folderName := name
-			pressed := false
+			var pressedTimerId glib.SourceHandle
 
-			// Drag gesture for press/release navigation with threshold
-			dragGesture := gtk.NewGestureDrag()
-			dragGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
-			dragGesture.Connect("drag-begin", func(startX, startY float64) {
-				pressed = true
-				fileItem.AddCSSClass("folder-pressed")
+			clickGesture := gtk.NewGestureClick()
+			clickGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
+			clickGesture.ConnectPressed(func(nPress int, x, y float64) {
+				pressedTimerId = glib.TimeoutAdd(50, func() bool {
+					fileItem.AddCSSClass("folder-pressed")
+					pressedTimerId = 0
+					return false
+				})
 			})
-
-			dragGesture.Connect("drag-update", func(offsetX, offsetY float64) {
-				if !pressed {
-					return
+			clickGesture.ConnectStopped(func() {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
 				}
-				dist := math.Hypot(offsetX, offsetY)
-				if dist > 45 {
-					pressed = false
-					fileItem.RemoveCSSClass("folder-pressed")
-				}
-			})
-
-			dragGesture.Connect("drag-end", func(offsetX, offsetY float64) {
 				fileItem.RemoveCSSClass("folder-pressed")
-				if !pressed {
-					return
+			})
+			clickGesture.ConnectReleased(func(nPress int, x, y float64) {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
 				}
-				pressed = false
-
-				dist := math.Hypot(offsetX, offsetY)
-				if dist > 45 {
-					return
-				}
-
+				fileItem.RemoveCSSClass("folder-pressed")
 				var newPath string
 				if path == "/" {
 					newPath = "/" + folderName
@@ -293,17 +282,18 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 				}
 				page.refreshFiles(newPath)
 			})
+			fileItem.AddController(clickGesture)
 
-			fileItem.AddController(dragGesture)
-
-			// Long press for context menu
 			longPress := gtk.NewGestureLongPress()
 			longPress.SetTouchOnly(false)
-			longPress.Connect("pressed", func(x, y float64) {
-				pressed = false
+			longPress.ConnectPressed(func(x, y float64) {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
+				}
 				fileItem.RemoveCSSClass("folder-pressed")
+				clickGesture.SetState(gtk.EventSequenceDenied)
 
-				// Create a single modal - reuse it for all content
 				modal := components.NewModal(parentOverlay)
 
 				// Forward declare for mutual recursion
@@ -554,38 +544,43 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			}
 
 			fileName := name
-			fileItem.AddCSSClass("clickable-folder") // Reuse folder styling for pressed state
-			pressed := false
+			fileItem.AddCSSClass("clickable-folder")
+			var pressedTimerId glib.SourceHandle
 
-			// Drag gesture for press visual feedback
-			dragGesture := gtk.NewGestureDrag()
-			dragGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
-			dragGesture.Connect("drag-begin", func(startX, startY float64) {
-				pressed = true
-				fileItem.AddCSSClass("folder-pressed")
+			clickGesture := gtk.NewGestureClick()
+			clickGesture.SetButton(uint(gdk.BUTTON_PRIMARY))
+			clickGesture.ConnectPressed(func(nPress int, x, y float64) {
+				pressedTimerId = glib.TimeoutAdd(50, func() bool {
+					fileItem.AddCSSClass("folder-pressed")
+					pressedTimerId = 0
+					return false
+				})
 			})
-			dragGesture.Connect("drag-update", func(offsetX, offsetY float64) {
-				if !pressed {
-					return
+			clickGesture.ConnectStopped(func() {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
 				}
-				dist := math.Hypot(offsetX, offsetY)
-				if dist > 45 {
-					pressed = false
-					fileItem.RemoveCSSClass("folder-pressed")
-				}
-			})
-			dragGesture.Connect("drag-end", func(offsetX, offsetY float64) {
 				fileItem.RemoveCSSClass("folder-pressed")
-				pressed = false
 			})
-			fileItem.AddController(dragGesture)
+			clickGesture.ConnectReleased(func(nPress int, x, y float64) {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
+				}
+				fileItem.RemoveCSSClass("folder-pressed")
+			})
+			fileItem.AddController(clickGesture)
 
-			// Long press for file context menu
 			longPress := gtk.NewGestureLongPress()
 			longPress.SetTouchOnly(false)
-			longPress.Connect("pressed", func(x, y float64) {
-				pressed = false
+			longPress.ConnectPressed(func(x, y float64) {
+				if pressedTimerId != 0 {
+					glib.SourceRemove(pressedTimerId)
+					pressedTimerId = 0
+				}
 				fileItem.RemoveCSSClass("folder-pressed")
+				clickGesture.SetState(gtk.EventSequenceDenied)
 
 				modal := components.NewModal(parentOverlay)
 
