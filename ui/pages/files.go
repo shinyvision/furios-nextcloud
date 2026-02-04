@@ -35,6 +35,71 @@ func truncateFileName(name string, maxLen int) string {
 	return truncated + "…"
 }
 
+// getFileTypeIcon returns the appropriate icon path for a given filename
+func getFileTypeIcon(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext != "" {
+		ext = ext[1:] // Remove leading dot
+	}
+
+	// Normalize some extensions to their common variant
+	iconExt := ext
+	switch ext {
+	case "jpeg":
+		iconExt = "jpg"
+	}
+
+	// First, try extension-specific icon (e.g., jpg.svg, pdf.svg)
+	extIconPath := fmt.Sprintf("assets/icons/filetypes/%s.svg", iconExt)
+	if _, err := os.Stat(extIconPath); err == nil {
+		return extIconPath
+	}
+	extIconPath = fmt.Sprintf("/app/share/nextcloud-gtk/assets/icons/filetypes/%s.svg", iconExt)
+	if _, err := os.Stat(extIconPath); err == nil {
+		return extIconPath
+	}
+
+	// Fall back to category-based icon
+	iconType := "unknown"
+	switch ext {
+	// Images
+	case "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tiff", "ico", "heic", "heif":
+		iconType = "image"
+	// Videos
+	case "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg":
+		iconType = "video"
+	// Audio
+	case "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus":
+		iconType = "audio"
+	// Documents
+	case "doc", "docx", "odt", "rtf", "txt", "md", "markdown":
+		iconType = "document"
+	// PDFs
+	case "pdf":
+		iconType = "pdf"
+	// Spreadsheets
+	case "xls", "xlsx", "ods", "csv":
+		iconType = "spreadsheet"
+	// Presentations
+	case "ppt", "pptx", "odp":
+		iconType = "presentation"
+	// Code
+	case "go", "py", "js", "ts", "java", "c", "cpp", "h", "hpp", "rs", "rb", "php", "html", "css", "json", "xml", "yaml", "yml", "sh", "bash", "sql":
+		iconType = "code"
+	// Archives
+	case "zip", "tar", "gz", "rar", "7z", "bz2", "xz":
+		iconType = "archive"
+	}
+
+	// Try local path first, then Flatpak path
+	iconPath := fmt.Sprintf("assets/icons/filetypes/%s.svg", iconType)
+	if _, err := os.Stat(iconPath); os.IsNotExist(err) {
+		iconPath = fmt.Sprintf("/app/share/nextcloud-gtk/assets/icons/filetypes/%s.svg", iconType)
+	}
+
+	return iconPath
+}
+
 // FilesPage holds the state and implements BackHandler for the files page.
 type FilesPage struct {
 	Box            *gtk.Box
@@ -531,7 +596,9 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 			})
 			fileItem.AddController(longPress)
 		} else {
-			icon := gtk.NewImageFromIconName("text-x-generic")
+			iconPath := getFileTypeIcon(name)
+			icon := gtk.NewImageFromFile(iconPath)
+			icon.AddCSSClass("file-icon")
 			icon.SetPixelSize(48)
 			fileItem.Append(icon)
 

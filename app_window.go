@@ -17,6 +17,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	window := gtk.NewApplicationWindow(app)
 	window.SetTitle("Nextcloud")
 	window.SetDefaultSize(360, 720)
+	window.SetDecorated(false)
 
 	overlay := gtk.NewOverlay()
 	window.SetChild(overlay)
@@ -136,9 +137,15 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		dimmer.SetVisible(open)
 	}
 
+	menuIconPath := "assets/icons/ui/menu.svg"
+	if _, err := os.Stat(menuIconPath); os.IsNotExist(err) {
+		menuIconPath = "/app/share/nextcloud-gtk/assets/icons/ui/menu.svg"
+	}
+	menuIcon := gtk.NewImageFromFile(menuIconPath)
+	menuIcon.SetPixelSize(24)
 	menuBtn := gtk.NewButton()
 	menuBtn.SetHasFrame(false)
-	menuBtn.SetChild(gtk.NewImageFromIconName("open-menu-symbolic"))
+	menuBtn.SetChild(menuIcon)
 	menuBtn.ConnectClicked(func() { toggleMenu(true) })
 	header.Append(menuBtn)
 
@@ -174,11 +181,16 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	titleBox.Append(menuLabel)
 	menuBox.Append(titleBox)
 
-	addMenuBtn := func(label string, icon string, action func()) {
+	addMenuBtn := func(label string, iconFile string, action func()) {
 		btn := gtk.NewButton()
 		btnBox := gtk.NewBox(gtk.OrientationHorizontal, 15)
 
-		img := gtk.NewImageFromIconName(icon)
+		iconPath := "assets/icons/ui/" + iconFile
+		if _, err := os.Stat(iconPath); os.IsNotExist(err) {
+			iconPath = "/app/share/nextcloud-gtk/assets/icons/ui/" + iconFile
+		}
+		img := gtk.NewImageFromFile(iconPath)
+		img.SetPixelSize(20)
 		btnBox.Append(img)
 
 		lbl := gtk.NewLabel(label)
@@ -190,15 +202,14 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		menuBox.Append(btn)
 	}
 
-	// Forward declaration for showPage (used by menu buttons)
 	var showPage func(string)
 
-	addMenuBtn("Files", "folder-symbolic", func() {
+	addMenuBtn("Files", "menu-folder.svg", func() {
 		toggleMenu(false)
 		showPage("files")
 	})
 
-	addMenuBtn("Settings", "settings-symbolic", func() {
+	addMenuBtn("Settings", "menu-settings.svg", func() {
 		toggleMenu(false)
 		showPage("settings")
 	})
@@ -516,14 +527,14 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	settingsPage = pages.NewSettingsPage(showPage)
 	stack.AddNamed(settingsPage.Box, "settings")
 
-	addMenuBtn("Logout", "system-log-out-symbolic", func() {
+	addMenuBtn("Logout", "menu-logout.svg", func() {
 		toggleMenu(false)
 		storage.ClearAuth()
 		loginPage.Reset()
 		showPage("server")
 	})
 
-	addMenuBtn("Close", "window-close-symbolic", func() {
+	addMenuBtn("Close", "menu-close.svg", func() {
 		toggleMenu(false)
 	})
 
@@ -555,12 +566,11 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	})
 	window.AddController(keyController)
 
-	// Dimmer click
-	clickGesture := gtk.NewGestureClick()
-	clickGesture.ConnectPressed(func(int, float64, float64) {
+	dimmerClick := gtk.NewGestureClick()
+	dimmerClick.ConnectReleased(func(int, float64, float64) {
 		toggleMenu(false)
 	})
-	dimmer.AddController(clickGesture)
+	dimmer.AddController(dimmerClick)
 
 	// Prevent destruction on close - just hide
 	window.ConnectCloseRequest(func() bool {
