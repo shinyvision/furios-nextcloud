@@ -190,35 +190,35 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		menuBox.Append(btn)
 	}
 
+	// Forward declaration for showPage (used by menu buttons)
+	var showPage func(string)
+
 	addMenuBtn("Files", "folder-symbolic", func() {
 		toggleMenu(false)
-		stack.SetVisibleChildName("files")
+		showPage("files")
 	})
 
 	addMenuBtn("Settings", "settings-symbolic", func() {
 		toggleMenu(false)
-		stack.SetVisibleChildName("settings")
+		showPage("settings")
 	})
 
 	// navigateTo will be set by the files page
 	var navigateTo func(string)
 
-	// Pages
-	showPage := func(name string) {
+	showPage = func(name string) {
 		stack.SetVisibleChildName(name)
-		// Hide header on first two pages
 		header.SetVisible(name != "server" && name != "login")
-		// Show plus button only on files page
 		plusBtn.SetVisible(name == "files")
-		// Show breadcrumb only on files page
-		breadcrumbBox.SetVisible(name == "files")
+		if name != "files" {
+			breadcrumbBox.SetVisible(false)
+			appIcon.SetVisible(true)
+		}
 
-		// Trigger file load when entering files page
 		if name == "files" && navigateTo != nil {
 			navigateTo("/")
 		}
 
-		// Update back button based on current page's BackHandler
 		glib.IdleAdd(updateBackButton)
 	}
 
