@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -73,16 +74,43 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	// Function to update breadcrumb - will be set after navigateTo is defined
 	var updateBreadcrumb func(path string)
 
-	// Back button handler system
-	var currentBackHandler func()
-	setBackHandler := func(handler func(), visible bool) {
-		currentBackHandler = handler
-		backBtn.SetVisible(visible)
-		appIcon.SetVisible(!visible)
+	// Forward declare stack for closures
+	var stack *gtk.Stack
+
+	// Track pages that implement BackHandler
+	var filesPage *pages.FilesPage
+	var settingsPage *pages.SettingsPage
+
+	// Get the active BackHandler based on visible page
+	getActiveBackHandler := func() pages.BackHandler {
+		visibleName := stack.VisibleChildName()
+		switch visibleName {
+		case "files":
+			return filesPage
+		case "settings":
+			return settingsPage
+		default:
+			return nil
+		}
 	}
+
+	// Update back button visibility based on current page
+	updateBackButton := func() {
+		handler := getActiveBackHandler()
+		if handler != nil && handler.ShowBackButton() {
+			backBtn.SetVisible(true)
+			appIcon.SetVisible(false)
+		} else {
+			backBtn.SetVisible(false)
+			appIcon.SetVisible(true)
+		}
+	}
+
 	backBtn.ConnectClicked(func() {
-		if currentBackHandler != nil {
-			currentBackHandler()
+		handler := getActiveBackHandler()
+		if handler != nil {
+			handler.HandleBack()
+			updateBackButton()
 		}
 	})
 
@@ -115,7 +143,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	header.Append(menuBtn)
 
 	// Page Stack
-	stack := gtk.NewStack()
+	stack = gtk.NewStack()
 	stack.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
 	mainBox.Append(stack)
 
@@ -189,6 +217,9 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		if name == "files" && navigateTo != nil {
 			navigateTo("/")
 		}
+
+		// Update back button based on current page's BackHandler
+		glib.IdleAdd(updateBackButton)
 	}
 
 	serverPage := pages.NewServerPage(showPage)
@@ -452,6 +483,7 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	updateBreadcrumb = func(path string) {
 		currentBreadcrumbPath = path
 		glib.IdleAdd(recalcBreadcrumb)
+		glib.IdleAdd(updateBackButton)
 	}
 
 	var lastHeaderWidth int
@@ -477,12 +509,12 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 		return true // Keep polling
 	})
 
-	filesPage, setNavigateTo := pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, setBackHandler, plusBtn, updateBreadcrumb)
-	navigateTo = setNavigateTo
-	stack.AddNamed(filesPage, "files")
+	filesPage = pages.NewFilesPage(overlay, showPage, func() { toggleMenu(true) }, plusBtn, updateBreadcrumb)
+	navigateTo = filesPage.NavigateTo
+	stack.AddNamed(filesPage.Box, "files")
 
-	settingsPage := pages.NewSettingsPage(showPage, setBackHandler)
-	stack.AddNamed(settingsPage, "settings")
+	settingsPage = pages.NewSettingsPage(showPage)
+	stack.AddNamed(settingsPage.Box, "settings")
 
 	addMenuBtn("Logout", "system-log-out-symbolic", func() {
 		toggleMenu(false)
@@ -504,6 +536,24 @@ func NewWindow(app *gtk.Application, debugMode bool) *gtk.ApplicationWindow {
 	} else {
 		showPage("server")
 	}
+
+	keyController := gtk.NewEventControllerKey()
+	keyController.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
+		if keyval == gdk.KEY_Back {
+			// First, close sidebar menu if open
+			if revealer.RevealChild() {
+				toggleMenu(false)
+				return true
+			}
+			handler := getActiveBackHandler()
+			if handler != nil && handler.HandleBack() {
+				updateBackButton()
+				return true
+			}
+		}
+		return false
+	})
+	window.AddController(keyController)
 
 	// Dimmer click
 	clickGesture := gtk.NewGestureClick()

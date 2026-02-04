@@ -7,16 +7,31 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-func NewSettingsPage(showPage func(string), setBackHandler func(func(), bool)) *gtk.Box {
+// SettingsPage holds the state and implements BackHandler for the settings page.
+type SettingsPage struct {
+	Box      *gtk.Box
+	showPage func(string)
+}
+
+// HandleBack handles the back button press - always goes back to files.
+func (p *SettingsPage) HandleBack() bool {
+	p.showPage("files")
+	return true
+}
+
+// ShowBackButton returns true - settings page always shows back button.
+func (p *SettingsPage) ShowBackButton() bool {
+	return true
+}
+
+func NewSettingsPage(showPage func(string)) *SettingsPage {
+	page := &SettingsPage{
+		showPage: showPage,
+	}
+
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.AddCSSClass("files-container") // Re-use light background class
-
-	// Show back button when settings page is mapped (becomes visible)
-	box.ConnectMap(func() {
-		setBackHandler(func() {
-			showPage("files")
-		}, true)
-	})
+	page.Box = box
 
 	content := gtk.NewBox(gtk.OrientationVertical, 20)
 	content.SetMarginTop(20)
@@ -99,5 +114,5 @@ func NewSettingsPage(showPage func(string), setBackHandler func(func(), bool)) *
 	})
 	addBox.Append(addBtn)
 
-	return box
+	return page
 }

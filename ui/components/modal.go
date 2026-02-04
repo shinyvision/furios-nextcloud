@@ -5,6 +5,26 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
+// activeModals tracks all currently visible modals for back button handling
+var activeModals []*Modal
+
+// CloseTopModal closes the topmost modal if any are open.
+// Returns true if a modal was closed, false if no modals were open.
+func CloseTopModal() bool {
+	if len(activeModals) == 0 {
+		return false
+	}
+	// Close the most recently opened modal (last in slice)
+	top := activeModals[len(activeModals)-1]
+	top.Hide()
+	return true
+}
+
+// HasActiveModal returns true if any modal is currently shown
+func HasActiveModal() bool {
+	return len(activeModals) > 0
+}
+
 type Modal struct {
 	parentOverlay *gtk.Overlay
 	contentBox    *gtk.Box
@@ -60,6 +80,9 @@ func (m *Modal) Show() {
 	}
 	m.isShown = true
 
+	// Track this modal for back button handling
+	activeModals = append(activeModals, m)
+
 	// Reset animation classes
 	m.contentBox.AddCSSClass("modal-animate-in")
 	m.contentBox.RemoveCSSClass("modal-animate-out")
@@ -78,6 +101,14 @@ func (m *Modal) Hide() {
 		return
 	}
 	m.isShown = false
+
+	// Remove from active modals tracking
+	for i, modal := range activeModals {
+		if modal == m {
+			activeModals = append(activeModals[:i], activeModals[i+1:]...)
+			break
+		}
+	}
 
 	// Trigger close animations
 	m.container.RemoveCSSClass("modal-visible")

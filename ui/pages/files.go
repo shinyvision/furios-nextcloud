@@ -36,14 +36,52 @@ func truncateFileName(name string, maxLen int) string {
 	return truncated + "…"
 }
 
-func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), setBackHandler func(func(), bool), plusBtn *gtk.Button, updateBreadcrumb func(string)) (*gtk.Box, func(string)) {
+// FilesPage holds the state and implements BackHandler for the files page.
+type FilesPage struct {
+	Box            *gtk.Box
+	currentPath    string
+	navigateUp     func()
+	refreshFiles   func(string)
+}
+
+// HandleBack handles the back button press.
+// Returns true if a modal was closed or navigation happened.
+func (p *FilesPage) HandleBack() bool {
+	// First, try to close any open modal
+	if components.CloseTopModal() {
+		return true
+	}
+	// Then, try to navigate up
+	if p.currentPath != "/" {
+		p.navigateUp()
+		return true
+	}
+	return false
+}
+
+// ShowBackButton returns true if the back button should be visible.
+func (p *FilesPage) ShowBackButton() bool {
+	return p.currentPath != "/"
+}
+
+// NavigateTo navigates to the specified path.
+func (p *FilesPage) NavigateTo(path string) {
+	if p.refreshFiles != nil {
+		p.refreshFiles(path)
+	}
+}
+
+func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu func(), plusBtn *gtk.Button, updateBreadcrumb func(string)) *FilesPage {
+	page := &FilesPage{
+		currentPath: "/",
+	}
+
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.AddCSSClass("files-container")
+	page.Box = box
 
 	// State variables
-	var currentPath = "/"
 	var grid *gtk.FlowBox
-	var refreshFiles func(string)
 	var spinner *gtk.Box
 
 	// Track folder items and their sync status
@@ -142,17 +180,18 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 	}
 
 	navigateUp := func() {
-		if currentPath == "/" {
+		if page.currentPath == "/" {
 			return
 		}
-		path := strings.TrimSuffix(currentPath, "/")
+		path := strings.TrimSuffix(page.currentPath, "/")
 		lastSlash := strings.LastIndex(path, "/")
 		if lastSlash <= 0 {
-			refreshFiles("/")
+			page.refreshFiles("/")
 		} else {
-			refreshFiles(path[:lastSlash])
+			page.refreshFiles(path[:lastSlash])
 		}
 	}
+	page.navigateUp = navigateUp
 
 	// Forward declaration for createFileItemWidget
 	var createFileItemWidget func(name string, isDir bool, path string, syncedSet map[string]bool) *gtk.Box
@@ -252,7 +291,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 				} else {
 					newPath = path + "/" + folderName
 				}
-				refreshFiles(newPath)
+				page.refreshFiles(newPath)
 			})
 
 			fileItem.AddController(dragGesture)
@@ -697,7 +736,7 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 	// Add an item to the grid in-place at the correct sorted position
 	addItemInPlace := func(name string, isDir bool, syncedSet map[string]bool) {
 		pos := findInsertPosition(name, isDir)
-		widget := createFileItemWidget(name, isDir, currentPath, syncedSet)
+		widget := createFileItemWidget(name, isDir, page.currentPath, syncedSet)
 		grid.Insert(widget, pos)
 
 		// Insert into gridItems at the same position
@@ -738,11 +777,12 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		}
 	}
 
+	var refreshFiles func(string)
 	refreshFiles = func(path string) {
-		currentPath = path
+		page.currentPath = path
 		// Update breadcrumb
 		if updateBreadcrumb != nil {
-			updateBreadcrumb(currentPath)
+			updateBreadcrumb(page.currentPath)
 		}
 		// Clear folder items map
 		for k := range folderItems {
@@ -757,13 +797,6 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 				break
 			}
 			grid.Remove(child)
-		}
-
-		// Update back button visibility
-		if currentPath == "/" {
-			setBackHandler(nil, false)
-		} else {
-			setBackHandler(navigateUp, true)
 		}
 
 		url, _ := storage.GetSetting("server_url")
@@ -892,10 +925,10 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 								// Build remote path
 								var remotePath string
-								if currentPath == "/" {
+								if page.currentPath == "/" {
 									remotePath = "/" + fileName
 								} else {
-									remotePath = currentPath + "/" + fileName
+									remotePath = page.currentPath + "/" + fileName
 								}
 
 								url, _ := storage.GetSetting("server_url")
@@ -991,10 +1024,10 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 
 				go func() {
 					var remotePath string
-					if currentPath == "/" {
+					if page.currentPath == "/" {
 						remotePath = "/" + folderName
 					} else {
-						remotePath = currentPath + "/" + folderName
+						remotePath = page.currentPath + "/" + folderName
 					}
 
 					url, _ := storage.GetSetting("server_url")
@@ -1027,5 +1060,6 @@ func NewFilesPage(parentOverlay *gtk.Overlay, showPage func(string), openMenu fu
 		modal.Show()
 	})
 
-	return box, refreshFiles
+	page.refreshFiles = refreshFiles
+	return page
 }
