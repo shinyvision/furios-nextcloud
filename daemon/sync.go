@@ -19,6 +19,21 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// extractSHA256FromChecksums extracts SHA256 hash from Nextcloud checksums string
+// Format: "sha256:abc123def456" or "SHA256:abc123def456" (case insensitive prefix)
+func extractSHA256FromChecksums(checksums string) string {
+	checksums = strings.TrimSpace(checksums)
+	for _, part := range strings.Split(checksums, " ") {
+		part = strings.TrimSpace(part)
+		lowerPart := strings.ToLower(part)
+		if strings.HasPrefix(lowerPart, "sha256:") {
+			// Return the hash part (after the colon), lowercase
+			return strings.ToLower(part[7:])
+		}
+	}
+	return ""
+}
+
 // SyncAction represents the action to take for a file
 type SyncAction int
 
@@ -62,6 +77,7 @@ type SyncEvent struct {
 type localFileState struct {
 	hash    string
 	modTime int64
+	size    int64
 	isDir   bool
 }
 
@@ -134,62 +150,57 @@ func (sm *SyncManager) withRetry(op func() error) error {
 	return lastErr
 }
 
-// isOnWiFi checks if the device is connected via WiFi (not mobile data)
-// This is a heuristic: if we find a wireless interface that's up and has an IP, we're on WiFi
-func isOnWiFi() bool {
+// isWiFiUp checks if any WiFi interface is in the UP state
+func isWiFiUp() bool {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		log.Printf("Failed to get network interfaces: %v", err)
-		return true // Assume WiFi if we can't check
+		return false
 	}
 
 	for _, iface := range interfaces {
-		// Skip loopback and down interfaces
+		name := strings.ToLower(iface.Name)
+		isWireless := strings.HasPrefix(name, "wl") ||
+			strings.HasPrefix(name, "wifi") ||
+			strings.HasPrefix(name, "wlan")
+
+		if isWireless && iface.Flags&net.FlagUp != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isNetworkUp checks if any non-loopback network interface is up and has an address
+func isNetworkUp() bool {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+
+	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
 		}
-
-		// Check for common WiFi interface names
-		name := strings.ToLower(iface.Name)
-		isWireless := strings.HasPrefix(name, "wl") || // wlan0, wlp3s0, etc.
-			strings.HasPrefix(name, "wifi") ||
-			strings.HasPrefix(name, "wlan") ||
-			strings.Contains(name, "wireless")
-
-		// Check for mobile data interface names
-		isMobile := strings.HasPrefix(name, "wwan") ||
-			strings.HasPrefix(name, "rmnet") ||
-			strings.HasPrefix(name, "usb") ||
-			strings.HasPrefix(name, "ppp")
-
-		if isMobile {
-			// Mobile data interface is up
-			addrs, _ := iface.Addrs()
-			if len(addrs) > 0 {
-				log.Printf("Mobile data interface detected: %s", iface.Name)
-				return false
-			}
-		}
-
-		if isWireless {
-			addrs, _ := iface.Addrs()
-			if len(addrs) > 0 {
-				return true // WiFi interface with IP address
-			}
+		addrs, _ := iface.Addrs()
+		if len(addrs) > 0 {
+			return true
 		}
 	}
-
-	// No mobile data detected, assume we're on WiFi or ethernet
-	return true
+	return false
 }
 
-// shouldSync checks if sync should proceed based on settings
+// shouldSync checks if sync should proceed based on network state and settings
 func shouldSync() bool {
-	// Check WiFi-only setting
+	if !isNetworkUp() {
+		log.Println("Skipping sync - no network connection")
+		return false
+	}
+
 	wifiOnly, _ := storage.GetSetting("sync_wifi_only")
 	if wifiOnly == "" || wifiOnly == "true" {
-		if !isOnWiFi() {
-			log.Println("Skipping sync - not on WiFi and WiFi-only mode is enabled")
+		if !isWiFiUp() {
+			log.Println("Skipping sync - WiFi is down and WiFi-only mode is enabled")
 			return false
 		}
 	}
@@ -210,6 +221,7 @@ func (sm *SyncManager) Start() {
 
 	go sm.remotePollingLoop()
 	go sm.tombstoneCleanupLoop()
+	go sm.networkMonitorLoop()
 	go sm.SyncAllFolders()
 }
 
@@ -241,15 +253,14 @@ func (sm *SyncManager) GetEventChannel() <-chan SyncEvent {
 }
 
 // decideSyncAction determines what action to take for a file based on state
-func decideSyncAction(localHash, remoteETag string, localExists, remoteExists bool, record *storage.SyncRecord) SyncAction {
+// remoteChecksum is the SHA256 from remote (if available) to compare with localHash
+// localSize and remoteSize are used as fallback when checksums aren't available
+func decideSyncAction(localHash, remoteETag, remoteChecksum string, localExists, remoteExists bool, localSize, remoteSize int64, record *storage.SyncRecord) SyncAction {
 	var knownLocalHash, knownRemoteETag string
 	if record != nil && !record.Deleted {
 		knownLocalHash = record.LocalHash
 		knownRemoteETag = record.RemoteETag
 	}
-
-	localChanged := localExists && localHash != knownLocalHash
-	remoteChanged := remoteExists && remoteETag != knownRemoteETag
 
 	// Both deleted
 	if !localExists && !remoteExists {
@@ -278,7 +289,24 @@ func decideSyncAction(localHash, remoteETag string, localExists, remoteExists bo
 		return ActionUpload // Conflict: remote deleted, local modified - upload
 	}
 
-	// Both exist
+	// Both exist - check if this is a fresh sync (no record)
+	if knownLocalHash == "" && knownRemoteETag == "" {
+		// No previous sync record - compare checksums if available
+		if remoteChecksum != "" && localHash == remoteChecksum {
+			return ActionNone // Files are identical, just needs record update
+		}
+		// No checksum available - use file size as heuristic
+		if remoteChecksum == "" && localSize == remoteSize && localSize > 0 {
+			return ActionNone // Same size, assume identical for fresh sync
+		}
+		// Different size or no checksum - download remote (conservative approach)
+		return ActionDownload
+	}
+
+	// We have a record - check for changes
+	localChanged := localHash != knownLocalHash
+	remoteChanged := remoteETag != knownRemoteETag
+
 	if !localChanged && !remoteChanged {
 		return ActionNone
 	}
@@ -286,9 +314,22 @@ func decideSyncAction(localHash, remoteETag string, localExists, remoteExists bo
 		return ActionUpload
 	}
 	if !localChanged && remoteChanged {
+		// Remote changed but maybe content is same - check checksum
+		if remoteChecksum != "" && localHash == remoteChecksum {
+			return ActionNone // Content is identical despite ETag change
+		}
 		return ActionDownload
 	}
-	return ActionConflict // Both changed
+	
+	// Both changed - check if content is actually identical
+	if remoteChecksum != "" && localHash == remoteChecksum {
+		return ActionNone
+	}
+	// Use size as last resort for conflict detection
+	if localSize == remoteSize {
+		return ActionNone // Same size, likely same content
+	}
+	return ActionConflict
 }
 
 // computeFileHash computes SHA256 hash of file contents
@@ -367,6 +408,7 @@ func gatherLocalState(localPath string) (map[string]*localFileState, error) {
 
 		state := &localFileState{
 			modTime: info.ModTime().Unix(),
+			size:    info.Size(),
 			isDir:   info.IsDir(),
 		}
 
@@ -440,7 +482,8 @@ func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
 	// Phase 1: Gather all state
 	localFiles, err := gatherLocalState(folder.LocalPath)
 	if err != nil {
-		log.Printf("Failed to gather local state for %s: %v", folder.LocalPath, err)
+		log.Printf("Failed to gather local state for %s: %v, aborting sync to prevent data loss", folder.LocalPath, err)
+		return
 	}
 
 	remoteFiles, remoteDirs, err := sm.gatherRemoteState(folder.RemotePath)
@@ -459,6 +502,26 @@ func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
 	syncRecords, err := gatherSyncRecords(folder.ID)
 	if err != nil {
 		log.Printf("Failed to gather sync records for folder %d: %v", folder.ID, err)
+		return
+	}
+
+	// Safety check: if we have sync records but no local files, the local storage
+	// may be temporarily unavailable (e.g., phone storage suspended, unmounted).
+	// Abort to prevent mass remote deletions.
+	localFileCount := 0
+	for _, state := range localFiles {
+		if state != nil && !state.isDir {
+			localFileCount++
+		}
+	}
+	activeRecordCount := 0
+	for _, record := range syncRecords {
+		if !record.Deleted {
+			activeRecordCount++
+		}
+	}
+	if localFileCount == 0 && activeRecordCount > 0 {
+		log.Printf("WARNING: No local files found but %d sync records exist for %s — aborting sync to prevent data loss (storage may be unavailable)", activeRecordCount, folder.LocalPath)
 		return
 	}
 
@@ -518,21 +581,37 @@ func (sm *SyncManager) syncFolder(folder storage.SyncFolder) {
 
 		var localHash string
 		var localExists bool
+		var localSize int64
 		if state, ok := localFiles[relPath]; ok && state != nil {
 			localHash = state.hash
 			localExists = true
+			localSize = state.size
 		}
 
 		var remoteETag string
 		var remoteExists bool
+		var remoteChecksum string
+		var remoteSize int64
 		remoteFile, ok := remoteFiles[relPath]
 		if ok {
 			remoteETag = remoteFile.ETag
 			remoteExists = true
+			remoteChecksum = extractSHA256FromChecksums(remoteFile.Checksums)
+			remoteSize = remoteFile.Size
+			if remoteFile.Checksums != "" {
+				log.Printf("DEBUG: %s has checksums: %s -> SHA256: %s", relPath, remoteFile.Checksums, remoteChecksum)
+			}
 		}
 
 		record := syncRecords[relPath]
-		action := decideSyncAction(localHash, remoteETag, localExists, remoteExists, record)
+		action := decideSyncAction(localHash, remoteETag, remoteChecksum, localExists, remoteExists, localSize, remoteSize, record)
+
+		// If files are identical but we have no record, create one
+		if action == ActionNone && record == nil && localExists && remoteExists {
+			log.Printf("Files identical, creating sync record for: %s", relPath)
+			storage.SaveSyncRecord(folder.ID, relPath, localHash, remoteETag, time.Now().Unix(), false)
+			continue
+		}
 
 		if action == ActionNone {
 			continue
@@ -965,15 +1044,18 @@ func (sm *SyncManager) syncFile(folder storage.SyncFolder, relPath string, remot
 	localPath := filepath.Join(folder.LocalPath, filepath.FromSlash(relPath))
 
 	// Check if it's a directory
-	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+	info, err := os.Stat(localPath)
+	if err == nil && info.IsDir() {
 		return
 	}
 
 	// Get local state
 	var localHash string
 	var localExists bool
-	if _, err := os.Stat(localPath); err == nil {
+	var localSize int64
+	if err == nil {
 		localExists = true
+		localSize = info.Size()
 		if h, err := computeFileHash(localPath); err == nil {
 			localHash = h
 		}
@@ -982,17 +1064,21 @@ func (sm *SyncManager) syncFile(folder storage.SyncFolder, relPath string, remot
 	// Get remote state
 	var remoteETag string
 	var remoteExists bool
+	var remoteChecksum string
+	var remoteSize int64
 	var remoteFile nextcloud.FileInfo
 	if rf, ok := remoteFiles[relPath]; ok {
 		remoteETag = rf.ETag
 		remoteExists = true
 		remoteFile = rf
+		remoteChecksum = extractSHA256FromChecksums(rf.Checksums)
+		remoteSize = rf.Size
 	}
 
 	// Get sync record
 	record, _ := storage.GetSyncRecord(folder.ID, relPath)
 
-	action := decideSyncAction(localHash, remoteETag, localExists, remoteExists, record)
+	action := decideSyncAction(localHash, remoteETag, remoteChecksum, localExists, remoteExists, localSize, remoteSize, record)
 
 	switch action {
 	case ActionUpload:
@@ -1085,8 +1171,15 @@ func (sm *SyncManager) watcherLoop(folder storage.SyncFolder, watcher *fsnotify.
 	var changesMux sync.Mutex
 	var debounceTimer *time.Timer
 	var timerMux sync.Mutex
+	var processing sync.Mutex // Prevent concurrent processChanges calls
 
 	processChanges := func() {
+		// Ensure only one processChanges runs at a time
+		if !processing.TryLock() {
+			return
+		}
+		defer processing.Unlock()
+
 		changesMux.Lock()
 		changes := make([]pendingOp, len(pendingChanges))
 		copy(changes, pendingChanges)
@@ -1409,6 +1502,35 @@ func (sm *SyncManager) tombstoneCleanupLoop() {
 			if err := storage.CleanupOldTombstones(30); err != nil {
 				log.Printf("Failed to cleanup tombstones: %v", err)
 			}
+		}
+	}
+}
+
+// networkMonitorLoop monitors network state and triggers sync when connectivity is restored
+func (sm *SyncManager) networkMonitorLoop() {
+	wasOnline := isNetworkUp()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sm.stopChan:
+			return
+		case <-ticker.C:
+			online := isNetworkUp()
+			if online && !wasOnline {
+				log.Println("Network connectivity restored, triggering sync")
+				go func() {
+					if sm.syncJobMux.TryLock() {
+						defer sm.syncJobMux.Unlock()
+						sm.SyncAllFolders()
+					}
+				}()
+			}
+			if !online && wasOnline {
+				log.Println("Network connectivity lost, pausing sync")
+			}
+			wasOnline = online
 		}
 	}
 }

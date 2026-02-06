@@ -33,6 +33,7 @@ type FileInfo struct {
 	ETag         string `json:"etag"`
 	LastModified int64  `json:"last_modified"`
 	Size         int64  `json:"size"`
+	Checksums    string `json:"checksums"` // Format: "SHA1:xxx SHA256:xxx MD5:xxx"
 }
 
 // WebDAV PROPFIND response types
@@ -51,15 +52,20 @@ type PropStat struct {
 	Status string `xml:"status"`
 }
 
+type Checksums struct {
+	Checksum []string `xml:"checksum"`
+}
+
 type Prop struct {
 	DisplayName  string `xml:"displayname"`
 	ResourceType struct {
 		Collection *struct{} `xml:"collection"`
 	} `xml:"resourcetype"`
-	FileID           string `xml:"fileid"`
-	GetLastModified  string `xml:"getlastmodified"`
-	GetETag          string `xml:"getetag"`
-	GetContentLength int64  `xml:"getcontentlength"`
+	FileID           string     `xml:"fileid"`
+	GetLastModified  string     `xml:"getlastmodified"`
+	GetETag          string     `xml:"getetag"`
+	GetContentLength int64      `xml:"getcontentlength"`
+	Checksums        Checksums  `xml:"checksums"`
 }
 
 type Client struct {
@@ -113,6 +119,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
     <d:getetag/>
     <d:getcontentlength/>
     <oc:fileid/>
+    <oc:checksums/>
   </d:prop>
 </d:propfind>`
 
@@ -182,6 +189,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 			ETag:         strings.Trim(r.PropStat.Prop.GetETag, `"`),
 			LastModified: lastMod,
 			Size:         r.PropStat.Prop.GetContentLength,
+			Checksums:    strings.Join(r.PropStat.Prop.Checksums.Checksum, " "),
 		})
 	}
 
