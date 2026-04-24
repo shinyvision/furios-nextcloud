@@ -1,0 +1,50 @@
+name: Build Flatpak (arm64)
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder ccache
+          flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Cache Flatpak Builder directory
+        uses: actions/cache@v5
+        with:
+          path: .flatpak-builder
+          key: ${{ runner.os }}-flatpak-builder-${{ hashFiles('io.github.shinyvision.NextcloudGtk.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-flatpak-builder-
+
+      - name: Build Flatpak
+        run: |
+          # This runs flatpak-builder with QEMU for arm64.
+          # It uses the manifest to pull the Golang SDK extension and build inside the sandbox.
+          # caching: we use --ccache and avoid --force-clean to reuse previous build artifacts
+          flatpak-builder --user --install-deps-from=flathub --arch=aarch64 --ccache --keep-build-dirs --repo=repo build-dir io.github.shinyvision.NextcloudGtk.yml
+
+      - name: Create Bundle
+        run: |
+          flatpak build-bundle --arch=aarch64 repo nextcloud-gtk.flatpak io.github.shinyvision.NextcloudGtk
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: nextcloud-gtk.flatpak

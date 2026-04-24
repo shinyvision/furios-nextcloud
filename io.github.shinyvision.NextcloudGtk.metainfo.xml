@@ -18,8 +18,8 @@
 
   <launchable type="desktop-id">io.github.shinyvision.NextcloudGtk.desktop</launchable>
 
-  <url type="homepage">https://github.com/shinyvision/nextcloud-gtk</url>
-  <url type="bugtracker">https://github.com/shinyvision/nextcloud-gtk/issues</url>
+  <url type="homepage">https://github.com/shinyvision/furios-nextcloud</url>
+  <url type="bugtracker">https://github.com/shinyvision/furios-nextcloud/issues</url>
   
   <content_rating type="oars-1.1" />
   
