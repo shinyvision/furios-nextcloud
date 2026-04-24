@@ -1,8 +1,9 @@
 name: Build Flatpak (arm64)
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   build:
